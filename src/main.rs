@@ -284,7 +284,6 @@ impl Server {
             self.initialized = true;
             return Ok(
                 json!({"serverInfo":{"name":"antigravity-app-server","version":env!("CARGO_PKG_VERSION")},
-                "externalSha256":native::EXTERNAL_SHA256,
                 "methods":METHODS,
                 "capabilities":{"protocol":"app-server-subset-v1","nativeEvents":true,"toolApproval":true,"acp":false}}),
             );
