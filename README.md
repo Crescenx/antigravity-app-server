@@ -1,10 +1,14 @@
 # antigravity-app-server
 
+简体中文 | [English](README.en.md)
+
 **把 Antigravity 原生 agent runtime 接入熟悉的 Thread / Turn / Item 工作流。**
 
 原生 ACP server 能对话，但把它接进一个完整的开发工具仍然费力：客户端还要处理会话恢复、运行中追加输入、工具审批、沙箱、使用量和长期任务。对已经围绕 Codex app-server 构建界面的应用来说，这些行为差异会直接变成适配成本。
 
 这个项目的目标是：**提供一个行为上尽量接近 Codex 的 app server，同时保留 Google Antigravity 的原生模型调用、工具定义和会话执行。** 它是独立的 Rust stdio JSON-RPC 服务，客户端直接启动进程即可使用，不依赖特定前端。
+
+**本项目大量参考和复用了 [OpenAI Codex](https://github.com/openai/codex) 的实现，项目本身也是通过 Codex 进行 vibe coding 开发的。** 协议和行为设计参考 Codex，OS sandbox 与自动审批直接使用已安装的 Codex，Guardian assessment 代码则改编自上游源码。具体区别与署名见[Codex 参考、复用与开发方式](#codex-参考复用与开发方式)。
 
 当前支持 **Linux x86_64 / WSL2**，固定适配 **`localharness_external` 1.4.0**。这是社区项目，不属于 Google 或 OpenAI；实现的是 Codex 风格的协议子集，不保证完整 API、提示词或模型行为兼容。
 
@@ -406,6 +410,18 @@ node scripts/export-source.mjs
 - MCP、原生网络工具及已授权全权限执行不受命令沙箱统一隔离。
 - 中断不能撤销已发生的副作用；未知结果需要检查和显式恢复，不自动重放。
 - 服务面向单个可信本地用户；stdio 不是带认证的多用户网络 API。
+
+## Codex 参考、复用与开发方式
+
+**本项目大量参考和复用了 [OpenAI Codex](https://github.com/openai/codex) 的实现，项目本身由 Codex vibe coding 开发而成。** 代码、文档与验证脚本均通过 Codex 辅助迭代完成。
+
+具体包括：
+
+- **协议与行为参考**：app-server、Thread / Turn / Item、steering、规则加载、Goal 与 V2 子代理协作等设计参考 Codex，并针对 Google 原生 runtime 实现所需子集。
+- **运行组件复用**：受限命令直接调用已安装 Codex 的 OS sandbox；自动审批连接 Codex app-server 及其审查模型。
+- **源码改编**：Guardian assessment 解析器和 schema 改编自 Codex 的 `ext/guardian-reviewer/src/assessment.rs`，保留 Apache-2.0 许可和上游署名。固定参考版本与改编说明见[来源说明](src/guardian/NOTICE.md)。
+
+Vibe coding 说明开发方式，不代表正确性保证或完整 Codex 兼容；已有验证与当前边界见上文。上游设计和复用组件的贡献归原作者，本项目并非 Google 或 OpenAI 官方项目。
 
 ## 许可与安全
 
