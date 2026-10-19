@@ -1,0 +1,16 @@
+node_modules/
+.exoskeleton/
+*.tmp
+.tmp/
+analysis-cache/
+__pycache__/
+target/
+.harness/
+.antigravity-app-server/
+.env
+.env.*
+!.env.example
+auth.json
+acp_token.json
+*.pem
+*.key

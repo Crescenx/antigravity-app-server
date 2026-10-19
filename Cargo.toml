@@ -1,0 +1,40 @@
+[package]
+name = "antigravity-app-server"
+version = "0.1.0"
+edition = "2024"
+description = "Rust stdio app server for the Antigravity native runtime"
+license = "MIT AND Apache-2.0"
+readme = "README.md"
+default-run = "antigravity-app-server"
+include = ["/Cargo.toml", "/Cargo.lock", "/src/**", "/LICENSE", "/NOTICE", "/README.md", "/SECURITY.md", "/CONTRIBUTING.md", "/docs/guardian.md", "/docs/protocol.md", "/examples/**", "/scripts/export-source.mjs", "/scripts/check-guardian.mjs", "/scripts/check-native-permissions.mjs", "/scripts/check-native-steer.mjs", "/scripts/check-native-instructions.mjs", "/scripts/check-native-subagents.mjs", "/scripts/check-models-goal.mjs", "/test/spec/rpc-client.mjs", "/.gitignore"]
+
+[[bin]]
+name = "antigravity-app-server"
+path = "src/main.rs"
+
+[[bin]]
+name = "antigravity-harness"
+path = "src/bin/legacy.rs"
+test = false
+bench = false
+
+[dependencies]
+anyhow = "1"
+async-stream = "0.3"
+axum = "0.8"
+base64 = "0.22.1"
+fs2 = "0.4"
+futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+jsonschema = { version = "0.33", default-features = false }
+prost = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.28"
+time = { version = "0.3", features = ["parsing"] }
+tempfile = "3"
+toml = "1.1.6"
+uuid = { version = "1", features = ["v4"] }

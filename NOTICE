@@ -1,0 +1,14 @@
+antigravity-app-server
+
+Project-authored code is licensed under MIT; see LICENSE.
+
+This distribution includes an adapted Guardian assessment contract from
+OpenAI Codex, Copyright 2025 OpenAI, under Apache License 2.0.
+See src/guardian/NOTICE.md and src/guardian/LICENSE-APACHE for provenance,
+modifications and license text. This code is not relicensed as MIT.
+
+Google Antigravity and OpenAI Codex are third-party products. This project is
+an independent client and is not affiliated with or endorsed by Google or
+OpenAI. Google binaries, SDK source, extracted protocol descriptors, account
+credentials and model weights are not included in the public source export.
+Users obtain and use those products under their respective terms.
