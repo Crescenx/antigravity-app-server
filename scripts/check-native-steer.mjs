@@ -1,3 +1,5 @@
+// Historical ACP SDK probe retained for evidence; incompatible with App core.
+throw new Error("RETIRED: this test targets the ACP 1.4.0 WebSocket/local-provider SDK. It cannot run against App 2.24.0 language_server. Use scripts/check-app-core.mjs --live for bounded App core lifecycle coverage.");
 // Real Rust stdio + pinned native runtime, with a held localhost model. No paid calls.
 import http from 'node:http';
 import path from 'node:path';

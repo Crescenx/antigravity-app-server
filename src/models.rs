@@ -309,91 +309,19 @@ pub fn quota(raw: &Value) -> Value {
 }
 
 pub async fn rate_limits(endpoint: &Value) -> Result<Value> {
-    if endpoint["httpHeaders"]["X-ACP-Proxy-Token"].is_null() {
-        return Ok(quota(&Value::Null));
-    }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(25))
-        .build()?;
-    let base = endpoint["baseUrl"]
-        .as_str()
-        .context("account endpoint missing")?
-        .trim_end_matches('/');
-    let response = client
-        .get(format!("{base}/v1beta/account/rateLimits"))
-        .header(
-            "X-ACP-Proxy-Token",
-            endpoint["httpHeaders"]["X-ACP-Proxy-Token"]
-                .as_str()
-                .context("invalid metadata token")?,
-        )
-        .send()
-        .await
-        .context("quota discovery request failed")?;
-    ensure!(
-        response.status().is_success(),
-        "quota discovery rejected: HTTP {}",
-        response.status()
-    );
-    Ok(quota(&response.json::<Value>().await?))
+    let response = native::rpc(
+        endpoint,
+        "RetrieveUserQuotaSummary",
+        json!({"forceRefresh":true}),
+    )
+    .await?;
+    Ok(quota(&response["response"]))
 }
 
 pub async fn fetch(endpoint: &Value) -> Result<Catalog> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
-    let base = endpoint["baseUrl"]
-        .as_str()
-        .context("model endpoint missing")?
-        .trim_end_matches('/');
-    let mut combined = Vec::new();
-    let mut cursor = String::new();
-    let mut seen = std::collections::BTreeSet::new();
-    loop {
-        let mut request = client
-            .get(format!("{base}/v1beta/models"))
-            .header("x-goog-api-key", endpoint["apiKey"].as_str().unwrap_or(""));
-        for (name, value) in endpoint["httpHeaders"].as_object().into_iter().flatten() {
-            request = request.header(
-                name,
-                value.as_str().context("invalid model request header")?,
-            );
-        }
-        if !cursor.is_empty() {
-            request = request.query(&[("pageToken", &cursor)]);
-        }
-        let response = request
-            .send()
-            .await
-            .context("model discovery request failed")?;
-        ensure!(
-            response.status().is_success(),
-            "model discovery rejected: HTTP {}",
-            response.status()
-        );
-        let raw: Value = response
-            .json()
-            .await
-            .context("invalid model discovery response")?;
-        if raw["models"].is_object() {
-            return Catalog::parse(&raw);
-        }
-        combined.extend(
-            raw["models"]
-                .as_array()
-                .context("model catalog missing models")?
-                .iter()
-                .cloned(),
-        );
-        cursor = raw["nextPageToken"].as_str().unwrap_or("").into();
-        if cursor.is_empty() {
-            return Catalog::parse(&json!({"models":combined}));
-        }
-        ensure!(
-            seen.insert(cursor.clone()) && seen.len() <= 100,
-            "invalid model catalog pagination"
-        );
-    }
+    let response =
+        native::rpc(endpoint, "GetAvailableModels", json!({"forceRefresh":true})).await?;
+    Catalog::parse(&response["response"])
 }
 
 #[cfg(test)]

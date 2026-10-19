@@ -67,8 +67,7 @@ pub fn tool_item(step: &Value, id: &str) -> Option<Value> {
             }
         }
         item["type"] = json!("fileChange");
-        item["changes"] =
-            json!([{"path":path,"kind":{"type":"update","move_path":null},"diff":diff}]);
+        item["changes"] = json!([{"path":path,"kind":{"type":if edit["fileCreated"]==true {"add"}else{"update"},"move_path":null},"diff":diff}]);
     } else if let Some(read) = step.get("viewFile") {
         item["type"] = json!("dynamicToolCall");
         item["tool"] = json!("view_file");
@@ -141,6 +140,7 @@ pub fn thread(thread: &Thread) -> Value {
         "collaborationMode":{"mode":thread.collaboration_mode,"settings":{"model":models::split(&thread.model).0,"reasoning_effort":models::split(&thread.model).1,"developer_instructions":thread.options.developer_instructions}},
         "createdAt":thread.created_at,"updatedAt":thread.updated_at,"preview":"",
         "path":null,"name":thread.name,"ephemeral":thread.options.ephemeral,"source":crate::subagents::source(thread),"cliVersion":env!("CARGO_PKG_VERSION"),
+        "nativeRuntime":thread.runtime.as_deref().unwrap_or("legacy-sdk"),"readOnly":thread.executable().is_err(),
         "agentNickname":thread.subagents.path.as_deref().and_then(|p|p.rsplit('/').next()),"agentRole":if thread.subagents.parent_id.is_some(){json!("default")}else{Value::Null},"gitInfo":null})
 }
 

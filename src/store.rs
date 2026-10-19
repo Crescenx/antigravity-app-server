@@ -12,6 +12,9 @@ use std::{
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
+    /// Absent on SDK-era records, which remain readable but cannot be executed.
+    #[serde(default)]
+    pub runtime: Option<String>,
     #[serde(default)]
     pub subagents: crate::subagents::State,
     #[serde(flatten)]
@@ -72,6 +75,13 @@ fn default_collaboration_mode() -> String {
 }
 
 impl Thread {
+    pub fn executable(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.runtime.as_deref() == Some("app-core-v1"),
+            "Legacy thread is read-only; create a new App core thread to continue"
+        );
+        Ok(())
+    }
     pub fn is_plan(&self) -> bool {
         self.collaboration_mode == "plan"
     }

@@ -356,6 +356,36 @@ impl Server {
         if call["toolName"] != "run_command"
             || !call["serverName"].as_str().unwrap_or("").is_empty()
         {
+            let name = call["toolName"].as_str().unwrap_or("");
+            let read_only = [
+                "view_file",
+                "view_file_outline",
+                "view_code_item",
+                "list_dir",
+                "find_by_name",
+                "grep_search",
+                "ask_question",
+                "notify_user",
+            ]
+            .contains(&name);
+            let full = thread.permissions()?.mode == "dangerFullAccess" && !thread.is_plan();
+            let unmanaged = [
+                "invoke_subagent",
+                "define_subagent",
+                "manage_subagents",
+                "schedule",
+            ]
+            .contains(&name);
+            let allowed = !unmanaged
+                && !thread.options.tools_disabled
+                && (full
+                    || read_only
+                    || (!thread.is_plan()
+                        && (name.starts_with("mcp_")
+                            || ["search_web", "read_url_content"].contains(&name))));
+            if !allowed {
+                return self.send(&thread.id,json!({"callHookResponse":{"requestId":request_id,"preToolResult":{"decision":"DENY","reason":"Tool is outside the active execution policy"}}})).await;
+            }
             return self.send(&thread.id,json!({"callHookResponse":{"requestId":request_id,"preToolResult":{"decision":"ALLOW"}}})).await;
         }
         let prepared = (|| -> Result<(String, Value)> {

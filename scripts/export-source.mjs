@@ -3,7 +3,7 @@ import {mkdir, readdir, readFile, writeFile, lstat} from 'node:fs/promises';
 import path from 'node:path';
 const root=path.resolve(import.meta.dirname,'..');
 const destination=path.join(root,'.tmp',`public-source-${Date.now()}`);
-const entries=['Cargo.toml','Cargo.lock','LICENSE','NOTICE','README.md','README.en.md','SECURITY.md','CONTRIBUTING.md','.gitignore','src','examples','docs/guardian.md','docs/protocol.md','scripts/export-source.mjs','scripts/check-guardian.mjs','scripts/check-native-permissions.mjs','scripts/check-native-steer.mjs','scripts/check-models-goal.mjs','scripts/check-native-instructions.mjs','scripts/check-native-subagents.mjs','test/spec/rpc-client.mjs'];
+const entries=['Cargo.toml','Cargo.lock','LICENSE','NOTICE','README.md','README.en.md','SECURITY.md','CONTRIBUTING.md','.gitignore','src','examples','docs/guardian.md','docs/protocol.md','scripts/export-source.mjs','scripts/app-core-env.mjs','scripts/check-app-core.mjs','scripts/check-native-token-budget.mjs','scripts/check-native-lifecycle.mjs','scripts/check-guardian.mjs','scripts/check-native-permissions.mjs','scripts/check-native-steer.mjs','scripts/check-models-goal.mjs','scripts/check-native-instructions.mjs','scripts/check-native-subagents.mjs','test/spec/rpc-client.mjs'];
 const files=[];
 async function collect(relative){
  const stat=await lstat(path.join(root,relative));

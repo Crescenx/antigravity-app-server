@@ -1,28 +1,36 @@
 # Stdio protocol
 
-The personal OAuth model proxy authenticates before reading request bodies, buffers
-them in anonymous temporary files, validates the complete JSON, and streams the
-upstream envelope without copying attachment strings into a JSON value tree.
-The default total request limit is 512 MiB; `AGY_MODEL_REQUEST_MAX_BYTES` sets a
-positive byte limit. Oversized uploads are drained before a descriptive 413 is
-returned, avoiding an early broken pipe. Temporary files close on completion or
-cancellation. This is a local transport ceiling, not an upstream attachment or
-context-window guarantee; adequate temporary disk space is required.
+The execution backend is Antigravity App 2.24.0's Linux x86_64 `language_server`,
+selected by `AGY_APP_CORE_BINARY` and pinned to SHA-256
+`4a3854e31d77200ccb1cd4c44cb5c01611c07d81006586b40c1ab1f2c9e80713`.
+It exposes local Connect RPCs for Cascade lifecycle and indexed state updates.
+The public stdio Thread / Turn / Item interface remains the client boundary.
+SDK / ACP `localharness_external` execution and the wrapper's model proxy have
+been removed. `AGY_EXTERNAL_BINARY`, `AGY_PERSONAL_CREDENTIALS`,
+`AGY_API_BASE_URL`, `AGY_MODEL_REQUEST_MAX_BYTES`, and
+`AGY_MODEL_IDLE_TIMEOUT_SECS` no longer configure model execution.
 
-Personal-account model transport allows 600 seconds without response data,
-including waiting for the first response headers. `AGY_MODEL_IDLE_TIMEOUT_SECS`
-overrides this positive timeout. A progressing stream has no total-duration
-cutoff: a large native file-tool call may be buffered upstream until its entire
-argument is generated. Connection establishment is bounded to 30 seconds;
-OAuth refresh and account metadata requests retain 20-second request limits.
-No failed model request is automatically replayed.
+Run `antigravity-app-server --login`, open the printed Google OAuth URL, and
+paste the authorization code if requested. Native token creation ends the command;
+Ctrl-C cancels. Authentication belongs to the App core;
+the auth home is `AGY_APP_AUTH_HOME`, defaulting to `app-auth` beneath the service
+state directory. Its native token file is `.gemini/jetski-standalone-oauth-token`.
+Use the same auth home for login and ordinary runs. Legacy ACP tokens and API-key
+proxy credentials are not imported. `--doctor` checks binary identity, token-file
+presence, and Codex review connectivity without testing Google authentication or
+inference. Upstream requests and refresh are managed by the native App.
 
-Transport metadata is appended to `transport.jsonl` under `AGY_APP_SERVER_HOME`
-(or `AGY_HARNESS_HOME`). It records request IDs, byte counts, response stages,
-elapsed time, HTTP version and error chains, without prompts, attachment data,
-credentials or upstream response bodies. `bodyBytesYielded` counts bytes handed
-to reqwest, not confirmation of remote receipt. Local timeouts return HTTP 504
-with a request ID; other local transport errors return HTTP 502 with their category.
+New threads carry `runtime: "app-core-v1"`. Older SDK records remain readable,
+but are read-only for execution; create a new App thread to continue work.
+Migration does not silently replay or convert old native histories.
+
+`StreamAgentStateUpdates` supplies complete replacements at absolute step indices.
+The adapter reconciles the complete indexed snapshot on reconnect with a fresh subscriber ID; reconnects
+do not resend user input. The root public thread ID is separate from
+`nativeTrajectoryId`, which addresses native approvals. `fullyIdle` after input
+observation ends a turn; an initial idle snapshot or transport EOF does not prove
+completion. Native configuration credentials are redacted from exported events,
+including raw App snapshots; user messages and tool output remain private data.
 
 User `image` and `localImage` inputs share preprocessing: images already within
 2576 pixels on each side and 5 MiB of Base64 retain their original bytes; larger
@@ -30,7 +38,7 @@ images are resized to both budgets. PNG retains transparency; other resized
 formats use JPEG quality 85 (GIF uses its first frame, noted in the media
 description). Input images are limited to 20,000,000 bytes, 64 million pixels,
 and 32768 pixels per dimension. MIME mismatches are rejected. These wrapper
-budgets also cover direct API-key mode; native tool reads keep native behavior.
+budgets apply before sending App input; native tool reads keep native behavior.
 PDF/audio bodies and repeated history attachments are preserved in full.
 
 Native `viewFile` steps appear as `dynamicToolCall` items named `view_file`, with
@@ -63,7 +71,7 @@ One JSON object per line. Requests use `id`, `method`, `params`; responses echo 
 
 Use the returned `thread.id`. Observe `item/started`, `item/completed`, `thread/tokenUsage/updated` and `turn/completed`. A successful turn/start response means accepted, not completed. Persist request identities; unknown execution outcomes must not be automatically replayed.
 
-Sessions: `thread/list`, `thread/read`, `thread/resume`, `thread/unload`, `thread/name/set`, `thread/archive`, `thread/unarchive`. Read with `{threadId}`; resume reattaches persisted native session state.
+Sessions: `thread/list`, `thread/read`, `thread/resume`, `thread/unload`, `thread/name/set`, `thread/archive`, `thread/unarchive`. Read with `{threadId}`; resume reattaches persisted App session state. Legacy SDK records cannot resume execution.
 
 Control: `turn/interrupt` uses `{threadId,turnId}`. `turn/steer` requires `threadId`, `expectedTurnId`, a unique `clientUserMessageId`, and the input array. Steering is durable and FIFO; dispatch acknowledgement is separate from provider consumption.
 
@@ -77,13 +85,21 @@ state directory removes leftover temporary state instead of resuming it. This is
 a local lifecycle guarantee, not a provider-side data-retention setting. An
 ephemeral thread cannot be resumed after unload or process exit.
 
-`baseInstructions` replaces the native system prompt; `developerInstructions`
-adds a separately labeled application section to the system prompt. Both accept
+`baseInstructions` replaces the selected built-in declarative prompt sections;
+`developerInstructions` adds a separately labeled custom application section. Both accept
 text (up to 128 KiB) or null to clear. They persist across turns; changes reconnect
 the idle native session. `collaborationMode.settings.developer_instructions` also
 accepts text. Google has no separate OpenAI developer-role tier: application
-instructions are mapped to system instructions, with Plan restrictions appended
+instructions are mapped to native prompt sections, with Plan restrictions appended
 when applicable. Tools and sandbox permissions remain enforced independently.
+
+The App planner uses `declarativeMixinConfig` for selected built-in and custom
+prompt sections, tools, and required execution hooks. Its
+`customizationDiscoveryConfig` sets `inheritUser:false` for rules, skills, MCP,
+hooks, plugins, agents, and workflows. The wrapper explicitly supplies approved
+skill paths, MCP servers, and its pre-tool authorization hook. It does not inherit
+arbitrary extensions from the authentication home. Output/model retry counts are
+configured to zero; a reconnect never authorizes a second user-input dispatch.
 
 Native session creation and reconnection also load user/project rules without
 requiring model tool calls. Global rules come from `CODEX_HOME` (default
@@ -113,16 +129,15 @@ environment discovery. Rule-file edits take effect at the next native
 connection, not during an active turn.
 
 `turn/start.outputSchema` accepts an object-root JSON Schema up to 64 KiB and
-applies to that turn only. It maps to the native SDK's `finishToolSchemaJson`,
-not to a text-only prompt. A structured `finish.outputString` becomes an ordinary
-`agentMessage.text` containing JSON. The wrapper also validates the final JSON;
-a missing or invalid result fails the turn rather than claiming success. External
-schema references are not fetched. Native tool-schema support remains a subset
-of JSON Schema; unsupported native schemas may be rejected by the provider.
+applies to that turn only. It adds native prompt instructions requesting a JSON
+object; the wrapper validates the final `agentMessage.text`. Missing or invalid
+JSON fails the turn rather than claiming success. External schema references
+are not fetched. This is not the former SDK `finishToolSchemaJson` contract or
+a guarantee of provider-enforced structured generation.
 
 For isolated workers, `config: {"tools_disabled": true, "mcp_servers": {}}`
 disables native filesystem, command, browsing, subagent, and skill tools and
-prevents MCP startup. The structured `finish` result remains available. This
+prevents MCP startup. Plain final responses, including validated JSON, remain available. This
 setting is enforced at tool dispatch too; it is not merely a prompt instruction.
 Each app-server process still needs its own state directory, including a forked
 worker. The Viewer creates a temporary directory and uses these same APIs for
@@ -132,9 +147,8 @@ Manual approvals have a server-issued `id` and method `item/commandExecution/req
 
 Discovery: `model/list`, `config/read`, `account/read`, `guardian/status` (optional `threadId`) and `collaborationMode/list`. Guardian status checks connectivity without inference.
 
-`model/list` reads the authenticated account catalog, caches it for five minutes,
-and accepts `limit`, `cursor`, and `includeHidden`. Personal OAuth requests use
-the Zed client surface (`host_path=zed/unknown`) and retain third-party models.
+`model/list` reads the App's authenticated `GetAvailableModels` catalog, caches
+it for five minutes, and accepts `limit`, `cursor`, and `includeHidden`.
 Agent-recommended models appear by default; `includeHidden: true` also includes
 the remaining account-advertised entries. Discovery does not run inference.
 
@@ -158,8 +172,8 @@ preserves an existing valid selection or uses the catalog default.
 `rateLimitsByLimitId`. Two independent entries, `antigravity-google` and
 `antigravity-external`, each have `primary` (300 minutes) and `secondary` (10080
 minutes). `usedPercent` is consumed quota, and `resetsAt` is Unix seconds.
-Unavailable windows stay null. API-key authentication does not expose the
-personal subscription's quotas. Google is the legacy top-level `rateLimits`
+Unavailable windows stay null. Data comes from the App's
+`RetrieveUserQuotaSummary`. Google is the legacy top-level `rateLimits`
 entry; it must not be treated as a combined allowance for all models.
 
 `thread/inject_items` accepts application-context messages with `type: "message"`,
@@ -172,6 +186,18 @@ the Goal; no extra user message or bootstrap inference is needed. Unknown
 injection outcomes must be reconciled rather than automatically replayed.
 
 Also available: `thread/goal/get|set|clear`, `skills/list`, `skills/config/write`, `mcpServerStatus/list`, `mcpServer/tool/call`, `mcpServer/resources/list`, `mcpServer/resource/read`. This is a protocol subset, not full Codex DTO compatibility.
+
+Goal `tokenBudget` prevents automatic continuation based on reported usage;
+unknown usage blocks a budgeted Goal. It is not a per-token hard cutoff.
+Thread `budget.maxModelCalls` and `maxToolCalls` limit logical model generations
+and tool calls. `maxInputTokens`, `maxOutputTokens`, and `maxTotalTokens`
+use a native post-invocation hook to inspect complete usage and stop before the
+next generation. Limits and lifetime/forward baselines persist across restart.
+The current generation and its tools may exceed the limit; no per-token hard
+cutoff is promised. Missing usage stops continuation.
+`usageUpdate.modelCallCount` counts root-trajectory `chatModel` generator records,
+not steps, retry attempts, independent reviews, or child-thread calls. Missing
+generator coverage or usage remains unknown rather than being reported as zero.
 
 One process owns its state directory. Closing stdin stops the server. Raw native journals contain user content and should remain private.
 

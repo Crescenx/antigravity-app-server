@@ -1,3 +1,5 @@
+// Historical ACP SDK probe retained for evidence; incompatible with App core.
+throw new Error("RETIRED: this test targets the ACP 1.4.0 WebSocket/local-provider SDK. It cannot run against App 2.24.0 language_server. Use scripts/check-app-core.mjs --live for bounded App core lifecycle coverage.");
 // Native runtime + local model metadata/generation fixture. No paid inference.
 import assert from 'node:assert/strict';
 import http from 'node:http';

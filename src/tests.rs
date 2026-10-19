@@ -441,6 +441,7 @@ pub(crate) fn fixture() -> (Server, Thread, mpsc::UnboundedReceiver<Value>) {
         .join(uuid::Uuid::new_v4().to_string());
     let store = Arc::new(Store::open(&root).unwrap());
     let thread = Thread {
+        runtime: Some("app-core-v1".into()),
         subagents: subagents::State::default(),
         options: Default::default(),
         collaboration_mode: "default".into(),
@@ -482,7 +483,10 @@ pub(crate) fn fixture() -> (Server, Thread, mpsc::UnboundedReceiver<Value>) {
         store,
         binary: PathBuf::new(),
         endpoint: json!({}),
-        model_catalog: None,
+        model_catalog: Some((
+            std::time::Instant::now(),
+            models::Catalog::parse(&json!({"models":{"test":{}}})).unwrap(),
+        )),
         output,
         events,
         connections: BTreeMap::new(),
@@ -1038,13 +1042,13 @@ fn skill_discovery_is_workspace_scoped_and_disabled_config_survives_reload() {
         std::slice::from_ref(&thread.cwd),
     )
     .unwrap();
-    let native = skills::native(&server.store, &thread.cwd).unwrap();
+    let native = native_config::build(&server.store, &thread, json!([])).unwrap();
     assert!(
-        !native["skills"]
+        !native["cascadeConfig"]["plannerConfig"]["customizationDiscoveryConfig"]["skills"]["skillsPaths"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|s| s["directoryPath"] == json!(directory))
+            .any(|s| s["absolute"] == path)
     );
     let sibling = thread.cwd.join("sibling");
     std::fs::create_dir(&sibling).unwrap();
@@ -1401,4 +1405,59 @@ async fn approval_errors_deny_and_duplicate_responses_cannot_reauthorize() {
     let root = server.store.root.clone();
     drop(server);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn sdk_threads_remain_readable_but_never_execute_after_migration() {
+    let (mut server, mut thread, _) = fixture();
+    thread.runtime = None;
+    thread.turns = vec![
+        json!({"id":"historic","status":"completed","items":[{"type":"agentMessage","text":"preserved history"}]}),
+    ];
+    server.store.save(&thread).unwrap();
+    let result = server
+        .request("thread/resume", json!({"threadId":thread.id}))
+        .await
+        .unwrap();
+    assert_eq!(result["thread"]["readOnly"], true);
+    assert_eq!(
+        result["thread"]["turns"][0]["items"][0]["text"],
+        "preserved history"
+    );
+    assert!(server.connections.is_empty());
+    for method in [
+        "turn/start",
+        "turn/steer",
+        "thread/settings/update",
+        "thread/inject_items",
+        "thread/goal/set",
+    ] {
+        let error = server
+            .request(method, json!({"threadId":thread.id}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("read-only"), "{method}: {error}");
+    }
+    server
+        .request(
+            "thread/name/set",
+            json!({"threadId":thread.id,"name":"Archived work"}),
+        )
+        .await
+        .unwrap();
+    server
+        .request("thread/archive", json!({"threadId":thread.id}))
+        .await
+        .unwrap();
+    let saved = server.store.load(&thread.id).unwrap();
+    assert_eq!(saved.turns, thread.turns);
+    assert!(saved.archived);
+    let mut old_json = serde_json::to_value(&thread).unwrap();
+    old_json.as_object_mut().unwrap().remove("runtime");
+    assert!(
+        serde_json::from_value::<Thread>(old_json)
+            .unwrap()
+            .executable()
+            .is_err()
+    );
 }

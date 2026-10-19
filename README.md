@@ -10,7 +10,7 @@
 
 **本项目大量参考和复用了 [OpenAI Codex](https://github.com/openai/codex) 的实现，项目本身也是通过 Codex 进行 vibe coding 开发的。** 协议和行为设计参考 Codex，OS sandbox 与自动审批直接使用已安装的 Codex，Guardian assessment 代码则改编自上游源码。具体区别与署名见[Codex 参考、复用与开发方式](#codex-参考复用与开发方式)。
 
-当前支持 **Linux x86_64 / WSL2**，固定适配 **`localharness_external` 1.4.0**。这是社区项目，不属于 Google 或 OpenAI；实现的是 Codex 风格的协议子集，不保证完整 API、提示词或模型行为兼容。
+当前支持 **Linux x86_64 / WSL2**，固定适配 **Antigravity App 2.24.0 的 `language_server`**。执行后端已改为 App 原生 Cascade 服务；不再启动 SDK / ACP 的 `localharness_external`。这是社区项目，不属于 Google 或 OpenAI；实现的是 Codex 风格的协议子集，不保证完整 API、提示词或模型行为兼容。
 
 [快速开始](#快速开始) · [沙箱与审批](#沙箱与审批) · [工具与命令](#工具与命令) · [规则与技能](#规则与技能) · [Goal](#持续任务-goal) · [子代理](#子代理与独立-worker) · [接口](#接口与客户端接入) · [协议参考](docs/protocol.md)
 
@@ -35,9 +35,9 @@
 ### 1. 准备依赖
 
 - 支持 Rust 2024 edition 的工具链，用于从源码构建。
-- Google `localharness_external` 的已适配版本，由用户单独取得。
+- Antigravity App 2.24.0 Linux x86_64 包内的 `language_server`，由用户单独取得。
 - Codex CLI，用于受限命令的 OS sandbox；自动审批还需要 Codex 登录及相应模型权限。
-- Google API key，或已经完成 onboarding 的个人账户凭据。
+- 通过 App 原生登录流程完成登录的 Google 账户。
 - Bash 与 util-linux 的 `setsid`（Linux / WSL 通常已安装），用于可取消的命令进程组。
 
 生产服务不需要 Node.js 或 Python。Node.js 24+ 仅用于示例、源码导出和可选集成检查。
@@ -53,45 +53,38 @@ codex login
 
 ### 2. 准备原生 runtime
 
-从 [Google 的 Linux x86_64 1.4.0 下载地址](https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.0-linux-x86_64.zip) 获取归档，解压后将环境变量指向 `localharness_external`，并赋予执行权限：
+从 [Antigravity 官方下载页](https://antigravity.google/download) 获取 App 2.24.0 Linux x86_64 包，提取其中的 `language_server`，并赋予执行权限。CLI、ACP 和 App 的版本号及二进制不可混用：
 
 ```sh
-export AGY_EXTERNAL_BINARY="/absolute/path/to/localharness_external"
-chmod +x "$AGY_EXTERNAL_BINARY"
+export AGY_APP_CORE_BINARY="/absolute/path/to/language_server"
+chmod +x "$AGY_APP_CORE_BINARY"
 export AGY_APP_SERVER_HOME="$HOME/.local/state/antigravity-app-server"
 ```
 
 服务启动时严格校验 runtime SHA-256，不会静默使用其他版本：
 
 ```text
-30c80540147b7f6ce9157f8fbfce1ce5308e96b10602d4236f9108463a839373
+4a3854e31d77200ccb1cd4c44cb5c01611c07d81006586b40c1ab1f2c9e80713
 ```
 
 仓库不分发 Google 二进制、SDK 或凭据；使用者需遵守上游使用条件。
 
 ### 3. 配置模型访问
 
-任选一种方式：
+启动原生登录流程，打开终端打印的 Google OAuth URL；若提示输入授权码，粘贴回终端。成功后自动退出，Ctrl-C 可取消：
 
 ```sh
-# API key；在本机通过环境变量提供真实值，不写入仓库。
-export GEMINI_API_KEY="YOUR_API_KEY"
+./target/release/antigravity-app-server --login
 ```
 
-```sh
-# 已有个人订阅凭据；此文件由上游登录流程生成。
-unset GEMINI_API_KEY
-export AGY_PERSONAL_CREDENTIALS="/absolute/private/path/acp_token.json"
-```
-
-个人 OAuth 路径属于实验性集成，优先于 API key。服务目前不提供首次登录、企业 onboarding 或账号管理界面。
+登录由 App 内核处理。认证目录默认为 `$AGY_APP_SERVER_HOME/app-auth`，可用 `AGY_APP_AUTH_HOME` 显式指定独立目录；原生 token 文件为该目录下的 `.gemini/jetski-standalone-oauth-token`。登录和正常服务必须使用同一认证目录。旧 ACP 的 `acp_token.json`、`AGY_PERSONAL_CREDENTIALS` 和 API-key 代理配置不再用于执行。
 
 ```sh
 ./target/release/antigravity-app-server --doctor
 ./target/release/antigravity-app-server
 ```
 
-`--doctor` 检查依赖、Codex 连接、登录状态、模型列表和审批策略，**不执行推理**；检查成功不等于账户上的每个模型都可实际调用。
+`--doctor` 检查内核哈希、原生 token 文件是否存在及 Codex 审查连接，**不执行推理，也不验证 Google 登录或模型调用**。账户模型目录由运行中的 App 服务查询。
 
 服务等待 stdin 中的 JSON-RPC。交互式演示可使用：
 
@@ -111,12 +104,14 @@ node examples/client.mjs /absolute/workspace "解释 README.md"
    ├─ 权限策略 ── Codex OS sandbox ── 本地命令与文件变更
    ├─ 审批边界 ── 人工客户端 / 独立 Codex 审批会话
    ├─ MCP 桥接 ── 用户配置的本地或远程服务
-   └─ 本地原生连接 ── localharness_external ── 模型提供方
+   └─ 本地 Connect RPC ── App language_server ── 模型提供方
 ```
 
 Google runtime 负责实际 agent 循环。包装层保留原生命令参数、输出和历史，把执行状态转成客户端可以消费的事件，并在执行前落实权限。模型名称、工具可用性和账户额度仍受上游约束。
 
 每个服务进程独占自己的状态目录，可承载多个线程。不要让两个进程同时使用同一个 `AGY_APP_SERVER_HOME`。stdout 只输出协议消息，诊断走 stderr；关闭 stdin 会停止服务。
+
+新线程使用 `app-core-v1` 标记并保存 App 原生轨迹。旧 SDK 线程保留为只读记录，可以查看历史，但不能 resume 后继续执行；继续工作需新建 App 线程。迁移源码不会自动替换已部署服务或更改客户端的默认后端。
 
 ## 沙箱与审批
 
@@ -230,7 +225,9 @@ project_doc_fallback_filenames = ["TEAM_RULES.md"]
 project_root_markers = [".git"]
 ```
 
-规则追加到 Google 原生基础提示词，不用 Codex 的系统提示词替换它。`baseInstructions` 是显式替换开关；`developerInstructions` 是额外的应用指令。Google 没有同构的 OpenAI developer-role 层级，不能由此推断完整角色优先级一致。
+规则通过 App 的声明式 prompt sections 追加到选定的 Google 内置提示词段落。`baseInstructions` 显式替换这些内置段落；`developerInstructions` 是额外的应用段落。Google 没有同构的 OpenAI developer-role 层级，不能由此推断完整角色优先级一致。
+
+App 的规则、技能、MCP、hooks、插件、代理及 workflow 自动继承均关闭；包装层按线程显式配置已发现的技能、MCP 桥和审批 hook，避免认证 home 下的个人扩展悄悄改变权限或工具集合。原生工具与提示词使用声明式配置，并保留消息投递、上下文摘要及调用限制所需的执行 hook。
 
 文件更改在下次原生连接时生效；已加载线程的普通下一轮和无变更 resume 不重新读取。需要刷新时，在空闲状态 unload，再 resume 持久线程。此实现不加载 Codex 的完整 trust/profile/项目配置栈，也不自动发现 `GEMINI.md`。
 
@@ -274,7 +271,7 @@ Goal 让一个已加载线程围绕明确目标继续工作，不需要客户端
 
 恢复使用 `thread/goal/set` 的 `status: "active"`；清除使用 `thread/goal/clear`。要立即停止当前轮，还需 `turn/interrupt`。卸载停止调度，但持久线程的目标会保留。
 
-`tokenBudget` 是基于已报告用量阻止继续的预算，不是逐 token 的硬截断，当前轮可能超出额度。另可在创建线程时提供原生 `budget`（如 `maxModelCalls`、`maxTotalTokens`）；自动审批的 Codex 用量独立计算。用量变得未知时，带预算的 Goal 停止自动继续。扩展时间/费用限制和注册式验证器尚未实现；`complete` 也不是独立测试认证。
+Goal 的 `tokenBudget` 根据已报告用量决定是否继续，不是逐 token 硬截断；当前轮可能超额。App 未提供足够用量时，带 token 预算的 Goal 停止自动继续。线程 `budget.maxModelCalls` / `maxToolCalls` 用于模型生成和工具调用上限；`maxInputTokens`、`maxOutputTokens`、`maxTotalTokens` 通过 App 原生调用结束 hook 检查累计用量，耗尽后阻止下一次模型调用及后续轮次；支持 lifetime / forward 范围和重启恢复。当前一次模型调用及其工具执行可能超额，这不是逐 token 硬截断。模型调用计数指当前根轨迹的逻辑生成，不含独立审批或子线程。扩展时间/费用限制和注册式验证器尚未实现；`complete` 也不是独立测试认证。
 
 ## 子代理与独立 worker
 
@@ -295,7 +292,7 @@ Goal 让一个已加载线程围绕明确目标继续工作，不需要客户端
 
 普通消息不会唤醒空闲父代理；父代理应使用 `wait_agent` 等待结果。中断根线程会同时中断正在工作的子代理；卸载父线程要求子代理空闲，并卸载它们。持久子线程可由后续任务恢复，临时线程卸载后不可恢复。未知执行结果不自动重放，需要通过现有 reconcile 流程确认。
 
-原生内置子代理工具仍被关闭：1.4.0 的 `kill` 会注销子代理，公开协议没有保留身份的定向中断，也没有只入队不唤醒的消息模式。这里仅补管理工具，未实现另一套模型调用循环。以上对应 Codex V2 协作语义，不提供旧版 `send_input` / `wait` / `close_agent` 别名，也不承诺完整 Codex 配置或内部历史格式兼容。用量和原生预算按各线程独立统计；父 Goal 的 tokenBudget 不自动汇总子代理费用。
+App 原生内置子代理调度仍被关闭，以便所有公开协作工具使用上述统一身份、队列和权限语义。包装层补充管理工具，每个线程的模型循环由 App 执行。这里不提供旧版 `send_input` / `wait` / `close_agent` 别名，也不承诺完整 Codex 配置或内部历史格式兼容。用量和预算按各线程独立统计；父 Goal 的 tokenBudget 不自动汇总子代理费用。
 
 客户端仍可直接创建一次性总结 worker，例如：
 
@@ -310,7 +307,7 @@ Goal 让一个已加载线程围绕明确目标继续工作，不需要客户端
 }
 ```
 
-`tools_disabled` 在配置和分派时都禁用工具，不只是提示词要求；结构化 `finish` 仍可用。临时线程不进入持久线程列表，卸载或正常退出后清理本地 native 临时状态；强杀残留在状态目录下次打开时清理。**卸载后不能恢复临时线程**，也不承诺提供方的数据零保留。
+`tools_disabled` 在配置和分派时都禁用工具，不只是提示词要求。`outputSchema` 通过结构化输出指令及最终 JSON 校验实现，未沿用 SDK 的 `finishToolSchemaJson`。临时线程不进入持久线程列表，卸载或正常退出后清理本地 native 临时状态；强杀残留在状态目录下次打开时清理。**卸载后不能恢复临时线程**，也不承诺提供方的数据零保留。
 
 这些机制适合客户端编排 worker，但不等于沙箱彼此隔离：同一工作目录上的多个线程仍能在其权限范围内访问相同文件。若要隔离并行修改，由客户端准备独立工作目录或 worktree；独立服务进程还必须使用各自状态目录。
 
@@ -348,25 +345,21 @@ Goal 让一个已加载线程围绕明确目标继续工作，不需要客户端
 
 | 环境变量 | 用途 |
 | --- | --- |
-| `AGY_EXTERNAL_BINARY` | 必填；已适配的 Google runtime 路径 |
-| `AGY_APP_SERVER_HOME` | 状态目录；兼容旧变量 `AGY_HARNESS_HOME`；均未设置时为当前目录下 `.antigravity-app-server` |
-| `GEMINI_API_KEY` | Google API key |
-| `AGY_PERSONAL_CREDENTIALS` | 已有个人 OAuth JSON 路径；优先于 API key |
-| `AGY_API_BASE_URL` | API-key 模式的替代端点；通常只在本地 fixture 中设置 |
+| `AGY_APP_CORE_BINARY` | 必填；哈希匹配 App 2.24.0 的 `language_server` 路径 |
+| `AGY_APP_SERVER_HOME` | 服务状态目录；兼容旧变量 `AGY_HARNESS_HOME`；建议显式设置绝对路径 |
+| `AGY_APP_AUTH_HOME` | 独立认证目录；默认位于服务状态目录的 `app-auth` 下 |
 | `CODEX_HOME` | Codex 账号/配置、全局规则的根目录，默认 `~/.codex` |
 | `AGY_CODEX_BINARY` | Codex 可执行文件公共覆盖路径 |
 | `AGY_CODEX_REVIEW_BINARY` / `AGY_CODEX_SANDBOX_BINARY` | 分别覆盖审批和 sandbox 可执行文件 |
 | `AGY_CODEX_CONNECTION` | `auto` / `daemon` / `stdio`，默认 `auto` |
 | `AGY_CODEX_SOCKET` | 显式指定 Codex daemon Unix socket |
 | `AGY_SKILLS_ROOT` | 替代用户级技能根目录 |
-| `AGY_MODEL_REQUEST_MAX_BYTES` | 个人 OAuth 请求总大小上限，默认 512 MiB |
-| `AGY_MODEL_IDLE_TIMEOUT_SECS` | 个人 OAuth 无响应数据超时，默认 600 秒 |
 
 Codex 自动发现检查显式配置、PATH 和常见用户安装目录。`auto` 优先连接当前 Codex home 下已有 daemon，找不到时启动私有 stdio 进程；只在模型调用前回退，不重启共享服务，也不自动重试付费调用。
 
-个人 OAuth 请求使用匿名临时文件缓存并流式转发，需要足够临时磁盘空间。持续有数据的流没有总时长截止；图片按 2576 边长和 5 MiB Base64 预算预处理。更多附件限制见协议文档。
+模型请求、OAuth 刷新及上游网络由 App 内核管理，包装层不再提供模型 HTTP 代理。`AGY_EXTERNAL_BINARY`、`AGY_PERSONAL_CREDENTIALS`、`AGY_API_BASE_URL`、`AGY_MODEL_REQUEST_MAX_BYTES`、`AGY_MODEL_IDLE_TIMEOUT_SECS` 均不控制当前执行路径；API key 环境变量不会传入内核。图片仍按 2576 边长和 5 MiB Base64 预算预处理，更多附件限制见协议文档。
 
-状态包含用户消息、工具参数与结果、原生历史及审批证据，可能包含敏感信息。`transport.jsonl` 仅记录请求大小、耗时、阶段和错误元数据，不记录请求正文或凭据。保管好状态目录；不要公开原始会话或 `.tmp` 中的探测报告。
+状态包含用户消息、工具参数与结果、原生历史及审批证据，可能包含敏感信息。导出的 App 配置事件会遮蔽认证、请求头和环境变量值，但这不使会话内容变成公开数据。旧代理的 `transport.jsonl` 不再是当前模型请求的日志。保管好状态与认证目录；不要公开原始会话或 `.tmp` 中的探测报告。
 
 ## 开发、验证与发布
 
@@ -378,20 +371,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-安装原生 runtime 与 Codex 后，可运行本地模型 fixture 集成验证：
-
-```sh
-cargo build --locked
-node scripts/check-native-permissions.mjs
-node scripts/check-guardian.mjs
-node scripts/check-native-steer.mjs
-node scripts/check-models-goal.mjs
-node scripts/check-native-instructions.mjs
-# 子代理生命周期、独立会话恢复和沙箱继承；本地模型夹具，不产生推理费用
-node scripts/check-native-subagents.mjs
-```
-
-这些默认脚本不消耗真实模型额度。单元测试、fixture 原生请求验证和真实账户验证是三种不同证据；发布说明应明确是哪一种。贡献约定和显式 live 检查见 [CONTRIBUTING](CONTRIBUTING.md)。
+旧 `check-native-*`、`check-models-goal.mjs` 和 `check-guardian.mjs` 等模型 fixture 脚本依赖已移除的 SDK / API-key 代理，应先迁移或退役，不能当作 App 后端的验证命令。新后端应分别验证 Connect 状态流、原生登录、工具审批与真实账户调用；单元测试、协议探测和真实模型运行提供不同证据。以上命令是检查入口，不表示当前迁移已通过全部检查或已切换部署默认值。贡献约定见 [CONTRIBUTING](CONTRIBUTING.md)。
 
 公开源码从白名单导出：
 

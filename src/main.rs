@@ -1,4 +1,3 @@
-mod auth;
 mod codex;
 mod compat;
 mod execution;
@@ -8,10 +7,14 @@ mod input;
 mod instructions;
 mod mcp;
 mod media;
-mod model_body;
 mod models;
 mod native;
+mod native_auth;
+mod native_bridge;
+mod native_budget;
 mod native_commands;
+mod native_config;
+mod native_state;
 mod permissions;
 mod session_options;
 mod skills;
@@ -115,69 +118,29 @@ fn now() -> u64 {
 }
 impl Server {
     async fn configure_thread(&mut self, thread: &mut Thread, params: &Value) -> Result<()> {
-        let effort = models::effort(params);
-        if effort.is_some_and(|v| !v.is_null() && v != "none") && self.model_catalog.is_none() {
+        let selecting = !params["model"].is_null()
+            || !params["collaborationMode"]["settings"]["model"].is_null()
+            || models::effort(params).is_some_and(|v| !v.is_null());
+        if selecting && self.model_catalog.is_none() {
             self.model_catalog = Some((
                 std::time::Instant::now(),
                 models::fetch(&self.endpoint).await?,
             ));
         }
         let mut params = params.clone();
-        let selecting = !params["model"].is_null()
-            || !params["collaborationMode"]["settings"]["model"].is_null()
-            || models::effort(&params).is_some_and(|v| !v.is_null());
         if selecting && let Some((_, catalog)) = &self.model_catalog {
             params["model"] = json!(catalog.resolve(&thread.model, &params)?);
         }
         configure(thread, &params)
     }
     async fn connect(&mut self, thread: &Thread, resume: bool) -> Result<Value> {
+        thread.executable()?;
         ensure!(
             !self.connections.contains_key(&thread.id),
             "thread already connected"
         );
         let permissions = thread.permissions()?;
         permissions::verify(&permissions, &thread.cwd).await?;
-        let full_access = permissions.mode == "dangerFullAccess";
-        // Even `never` must reach our policy guard: it denies escalation rather
-        // than allowing native commands to skip the verified execution route.
-        let policy = json!({"tool":"*","decision":"POLICY_DECISION_ASK_USER","isDynamic":true,"ruleId":"client"});
-        let native_root = self.store.native_root(&thread.id);
-        let mut config = json!({
-            "cascadeId":thread.id,"sessionContinuationMode":if resume {"RESUME"} else {"CREATE_ONLY"},
-            "appDataDir":native_root.join("app"),
-            "workspaces":std::iter::once(&thread.cwd).chain(&thread.additional_directories).map(|path|json!({"filesystemWorkspace":{"directory":path}})).collect::<Vec<_>>(),
-            "agentBehavior":"AGENT_BEHAVIOR_INTERACTIVE",
-            "enabledHooks":["LIFECYCLE_HOOK_PRE_TOOL","LIFECYCLE_HOOK_POST_TOOL"],
-            "harnessSideTools":{
-                "find":{"enabled":true},"viewFile":{"enabled":true},"grepSearch":{"enabled":true},
-                "fileEdit":{"enabled":full_access},"writeToFile":{"enabled":full_access},
-                "runCommand":{"enabled":true,"enableSandbox":true,"maxTimeoutMs":120000,"enableDaemonCommands":full_access,"executionMode":if full_access {"TOOL_EXECUTION_MODE_ASYNC"} else {"TOOL_EXECUTION_MODE_SYNC"}},
-                "manageTask":{"enabled":full_access},"subagents":{"enabled":false}
-            },
-            "models":[{"name":thread.model,"types":["MODEL_TYPE_TEXT"],"geminiApiEndpoint":self.endpoint}],
-            "tools":if full_access {vec![]} else {permissions::file_tool_schemas()},
-            "retryConfig":{"apiRetry":{"maxRetries":0},"modelOutputRetry":{"maxRetries":0}},
-            "policyConfig":{"rules":[policy],"workspaceContainment":"WORKSPACE_CONTAINMENT_DISABLED"}
-        });
-        if let Some(budget) = &thread.budget {
-            config["budgetConfig"] = budget.clone();
-        }
-        config["skillsConfig"] = if thread.options.tools_disabled {
-            json!({"enabled":false})
-        } else {
-            skills::native(&self.store, &thread.cwd)?
-        };
-        if thread.is_plan() {
-            config["harnessSideTools"]["subagents"] = json!({"enabled":false});
-        }
-        let guidance = instructions::load(&thread.cwd, &thread.options.instruction_config)?;
-        let mut parent_guidance = guidance.clone();
-        if subagents::enabled(thread) {
-            parent_guidance.push(subagents::guidance(thread));
-        }
-        session_options::native(thread, &mut config, &parent_guidance);
-        subagents::native(thread, &mut config);
         // MCP tool annotations are advisory, not an enforceable read-only boundary.
         // Do not even start external servers while planning.
         let plan_servers = json!({});
@@ -196,7 +159,10 @@ impl Server {
             },
         )
         .await?;
-        config["mcpServers"] = hub.native();
+        let native_root = self.store.native_root(&thread.id);
+        let mut config = native_config::build(&self.store, thread, hub.native())?;
+        config["authHome"] = self.endpoint["authHome"].clone();
+        config["resume"] = json!(resume);
         let (mut native, init) = native::Native::open(&self.binary, &native_root, config).await?;
         if init["initializeConversationResponse"]["cascadeId"] != thread.id {
             native.close().await;
@@ -289,6 +255,21 @@ impl Server {
             );
         }
         ensure!(self.initialized, "initialize first");
+        if matches!(
+            method,
+            "turn/start"
+                | "turn/steer"
+                | "turn/interrupt"
+                | "thread/configure"
+                | "thread/settings/update"
+                | "thread/inject_items"
+                | "thread/reconcile"
+                | "thread/goal/set"
+                | "thread/goal/clear"
+                | "mcpServer/tool/call"
+        ) {
+            self.store.load(text(&p, "threadId")?)?.executable()?;
+        }
         match method {
             "collaborationMode/list" => Ok(
                 json!({"data":[{"mode":"default","name":"Default","model":null,"reasoning_effort":null},{"mode":"plan","name":"Plan","model":null,"reasoning_effort":null}]}),
@@ -303,7 +284,10 @@ impl Server {
                     );
                     thread.name = Some(name.into());
                 } else {
-                    ensure!(thread.status == "idle", "archive requires an idle thread");
+                    ensure!(
+                        thread.executable().is_err() || thread.status == "idle",
+                        "archive requires an idle thread"
+                    );
                     thread.archived = method == "thread/archive";
                     if thread.archived {
                         self.unload_agent_children(&thread).await?;
@@ -449,11 +433,25 @@ impl Server {
                 };
                 Ok(guardian::status(&config).await)
             }
-            "config/read" => Ok(
-                json!({"config":{"model":"gemini-2.5-flash","model_provider":"google","approval_policy":"on-request","approvals_reviewer":guardian::default_reviewer(),"guardian":guardian::ReviewConfig::default(),"sandbox_mode":"workspace-write"},"origins":{},"layers":[]}),
-            ),
+            "config/read" => {
+                if self.model_catalog.is_none() {
+                    self.model_catalog = Some((
+                        std::time::Instant::now(),
+                        models::fetch(&self.endpoint).await?,
+                    ));
+                }
+                let catalog = &self.model_catalog.as_ref().unwrap().1;
+                let model = &catalog
+                    .entries
+                    .iter()
+                    .find(|m| m["isDefault"] == true)
+                    .unwrap_or(&catalog.entries[0])["model"];
+                Ok(
+                    json!({"config":{"model":model,"model_provider":"google","approval_policy":"on-request","approvals_reviewer":guardian::default_reviewer(),"guardian":guardian::ReviewConfig::default(),"sandbox_mode":"workspace-write"},"origins":{},"layers":[]}),
+                )
+            }
             "account/read" => Ok(
-                json!({"account":null,"requiresOpenaiAuth":false,"provider":"google","authentication":{"configured":true,"verified":false}}),
+                json!({"account":null,"requiresOpenaiAuth":false,"provider":"google","authentication":native_auth::status(&self.endpoint,&native::auth_home(&self.store.root)).await}),
             ),
             "thread/goal/get" => {
                 let thread = self.store.load(text(&p, "threadId")?)?;
@@ -475,7 +473,24 @@ impl Server {
                     ["on-request", "never"].contains(&approval),
                     "unsupported approvalPolicy"
                 );
+                if self.model_catalog.is_none() {
+                    self.model_catalog = Some((
+                        std::time::Instant::now(),
+                        models::fetch(&self.endpoint).await?,
+                    ));
+                }
+                let catalog = &self.model_catalog.as_ref().unwrap().1;
+                let default = catalog
+                    .entries
+                    .iter()
+                    .find(|m| m["isDefault"] == true)
+                    .unwrap_or(&catalog.entries[0]);
+                let model = catalog.resolve(
+                    default["model"].as_str().context("invalid default model")?,
+                    &p,
+                )?;
                 let mut thread = Thread {
+                    runtime: Some("app-core-v1".into()),
                     subagents: subagents::State::default(),
                     options: session_options::Options {
                         ephemeral: p["ephemeral"] == true,
@@ -484,7 +499,7 @@ impl Server {
                     collaboration_mode: "default".into(),
                     id: uuid::Uuid::new_v4().to_string(),
                     cwd,
-                    model: p["model"].as_str().unwrap_or("gemini-2.5-flash").into(),
+                    model,
                     pending_context: Vec::new(),
                     name: None,
                     archived: false,
@@ -578,6 +593,9 @@ impl Server {
             "thread/resume" => {
                 compat::policy(&p)?;
                 let mut thread = self.store.load(text(&p, "threadId")?)?;
+                if thread.executable().is_err() {
+                    return Ok(compat::response(&thread, Value::Null));
+                }
                 let previous = thread.clone();
                 self.configure_thread(&mut thread, &p).await?;
                 let changed = serde_json::to_value(&thread)? != serde_json::to_value(&previous)?;
@@ -636,7 +654,10 @@ impl Server {
             "thread/unload" => {
                 let id = text(&p, "threadId")?;
                 let thread = self.store.load(id)?;
-                ensure!(thread.status == "idle", "thread is not idle");
+                ensure!(
+                    thread.executable().is_err() || thread.status == "idle",
+                    "thread is not idle"
+                );
                 self.unload_agent_children(&thread).await?;
                 self.disconnect(id).await;
                 self.store.forget_ephemeral(id);
@@ -853,7 +874,7 @@ impl Server {
         if let Some(hook) = event.get("callHookRequest") {
             return self.native_hook(&mut thread, hook).await;
         }
-        if let Some(usage) = event.get("usageUpdate") {
+        if let Some(usage) = event.get("usageUpdate").filter(|u| u["total"].is_object()) {
             if usage != &thread.usage {
                 thread.token_usage = compat::usage(usage, &thread.usage);
                 notify(
@@ -1303,6 +1324,7 @@ fn configure(thread: &mut Thread, params: &Value) -> Result<()> {
                 }
             }
             thread.budget = Some(budget.clone());
+            native_budget::validate(thread.budget.as_ref())?;
         }
     }
     if thread.permission_policy.is_none()
@@ -1354,8 +1376,24 @@ fn configure(thread: &mut Thread, params: &Value) -> Result<()> {
     Ok(())
 }
 
+fn state_home() -> PathBuf {
+    let path = PathBuf::from(
+        std::env::var_os("AGY_APP_SERVER_HOME")
+            .or_else(|| std::env::var_os("AGY_HARNESS_HOME"))
+            .unwrap_or_else(|| ".harness".into()),
+    );
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir().unwrap().join(path)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    if native_bridge::helper_main().await? {
+        return Ok(());
+    }
     if let Some(code) = permissions::helper_main() {
         std::process::exit(code);
     }
@@ -1364,7 +1402,7 @@ async fn main() -> Result<()> {
         [] => {}
         [flag] if flag == "--help" || flag == "-h" => {
             println!(
-                "antigravity-app-server {}\n\nUsage: antigravity-app-server [--doctor | --version | --help]\n\nWith no arguments, serve newline-delimited JSON-RPC over stdin/stdout.\n--doctor checks local Codex connectivity and prerequisites without model calls.\n\nRequired: AGY_EXTERNAL_BINARY and GEMINI_API_KEY (or AGY_PERSONAL_CREDENTIALS).\nOptional: AGY_APP_SERVER_HOME, CODEX_HOME, AGY_CODEX_BINARY,\n          AGY_CODEX_CONNECTION=auto|daemon|stdio, AGY_CODEX_SOCKET.\nSee README.md for setup and examples/client.mjs for a complete client.",
+                "antigravity-app-server {}\n\nUsage: antigravity-app-server [--login | --doctor | --version | --help]\n\nWith no arguments, serve newline-delimited JSON-RPC over stdin/stdout.\n--doctor checks local Codex connectivity and prerequisites without model calls.\n\nRequired: AGY_APP_CORE_BINARY. Run --login once for native account authentication.\nOptional: AGY_APP_SERVER_HOME, CODEX_HOME, AGY_CODEX_BINARY,\n          AGY_CODEX_CONNECTION=auto|daemon|stdio, AGY_CODEX_SOCKET.\nSee README.md for setup and examples/client.mjs for a complete client.",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -1373,17 +1411,26 @@ async fn main() -> Result<()> {
             println!("antigravity-app-server {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
+        [flag] if flag == "--login" => {
+            let binary = native::binary()?;
+            native::verify_binary(&binary)?;
+            let store = Store::open(&state_home())?;
+            let status = native_auth::login(
+                &binary,
+                &store.root.join("app-core-control"),
+                &native::auth_home(&store.root),
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            return Ok(());
+        }
         [flag] if flag == "--doctor" => {
             let review = guardian::status(&guardian::ReviewConfig::default()).await;
-            let native = std::env::var_os("AGY_EXTERNAL_BINARY")
-                .context("Set AGY_EXTERNAL_BINARY to the supported localharness_external")
-                .and_then(|p| native::verify_binary(std::path::Path::new(&p)));
-            let credential_file = std::env::var_os("AGY_PERSONAL_CREDENTIALS").map(PathBuf::from);
-            let credentials_configured = if let Some(path) = credential_file {
-                path.is_file()
-            } else {
-                std::env::var_os("GEMINI_API_KEY").is_some_and(|v| !v.is_empty())
-            };
+            let native = native::binary().and_then(|p| native::verify_binary(&p));
+            let root = state_home();
+            let credentials_configured = native::auth_home(&root)
+                .join(".gemini/jetski-standalone-oauth-token")
+                .is_file();
             println!(
                 "{}",
                 serde_json::to_string_pretty(
@@ -1400,15 +1447,17 @@ async fn main() -> Result<()> {
             .or_else(|_| std::env::var("AGY_HARNESS_HOME"))
             .unwrap_or(".harness".into()),
     );
-    let binary = PathBuf::from(
-        std::env::var("AGY_EXTERNAL_BINARY")
-            .context("set AGY_EXTERNAL_BINARY to localharness_external")?,
-    )
-    .canonicalize()?;
+    let binary = native::binary()?;
     native::verify_binary(&binary)?;
-    let (endpoint, proxy) = auth::endpoint().await?;
     let store = Arc::new(Store::open(&root)?);
+    let auth_home = native::auth_home(&store.root);
+    let core =
+        native::Process::open(&binary, &store.root.join("app-core-control"), &auth_home).await?;
+    let endpoint = core.endpoint.clone();
     for mut thread in store.list()? {
+        if thread.executable().is_err() {
+            continue;
+        }
         if thread.status == "running" {
             steer::mark_unknown(&mut thread);
             native_commands::mark_unknown(
@@ -1507,9 +1556,7 @@ async fn main() -> Result<()> {
         server.disconnect(&id).await;
     }
     drop(server);
-    if let Some(proxy) = proxy {
-        proxy.abort();
-    }
+    core.close().await;
     writer.await??;
     // Tokio's blocking stdin read cannot be cancelled when a signalling client keeps its pipe open.
     // All sessions and the output writer have already been closed above.

@@ -156,14 +156,3 @@ pub fn write(store: &Store, params: &Value, cwds: &[PathBuf]) -> Result<Value> {
     std::fs::File::open(&store.root)?.sync_all()?;
     Ok(json!({"effectiveEnabled":enabled}))
 }
-pub fn native(store: &Store, cwd: &Path) -> Result<Value> {
-    let group = discover(store, cwd)?;
-    let entries = group["skills"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|s| s["enabled"] == true)
-        .map(|s| json!({"directoryPath":Path::new(s["path"].as_str().unwrap()).parent()}))
-        .collect::<Vec<_>>();
-    Ok(json!({"enabled":!entries.is_empty(),"skills":entries}))
-}

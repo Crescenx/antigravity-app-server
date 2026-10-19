@@ -91,55 +91,6 @@ pub fn configure(thread: &mut Thread, params: &Value) -> Result<()> {
     Ok(())
 }
 
-pub fn native(thread: &Thread, config: &mut Value, guidance: &[Value]) {
-    let options = &thread.options;
-    let mut sections = guidance.to_vec();
-    if let Some(text) = &options.developer_instructions {
-        sections.push(json!({"title":"Application instructions", "content":text}));
-    }
-    if !options.tools_disabled && (!thread.unrestricted || thread.is_plan()) {
-        sections.push(json!({"title":"Command execution","content":"Use run_command for noninteractive commands. Commands run under the configured filesystem and network sandbox. Request BypassSandbox only when the specific command needs approval outside that sandbox. Persistent terminals, daemon commands and manage_task input are unavailable in restricted sessions; leave RunPersistent false and do not reuse RequestedTerminalID. Shell variables do not persist between calls. File writes and replacements use the provided sandboxed file tools."}));
-    }
-    if thread.is_plan() {
-        sections.push(json!({"title":"Collaboration mode: Plan","content":"You are in Plan mode. Investigate with read-only tools, clarify requirements, and develop a concrete implementation plan. Do not implement changes, write files, run mutating commands, access the network through tools, bypass sandbox restrictions, invoke external MCP tools or child agents, or activate autonomous goals. Present the plan for user review. This mode remains active until the client explicitly switches to Default."}));
-    }
-    if let Some(schema) = &options.output_schema {
-        config["finishToolSchemaJson"] = json!(schema.to_string());
-        sections.push(json!({"title":"Structured final output","content":"Finish by calling the finish tool with an object matching its schema. Do not substitute a prose answer or Markdown code block."}));
-    }
-    if let Some(base) = &options.base_instructions {
-        let mut parts = vec![json!({"text":base})];
-        parts.extend(sections.iter().map(|s| json!({"text":format!("{}\n{}",s["title"].as_str().unwrap(),s["content"].as_str().unwrap())})));
-        config["systemInstructions"] = json!({"custom":{"part":parts}});
-    } else if !sections.is_empty() {
-        config["systemInstructions"] = json!({"appended":{"appendedSections":sections}});
-    }
-    if options.tools_disabled {
-        config["tools"] = json!([]);
-        config["skillsConfig"] = json!({"enabled":false});
-        for tool in [
-            "find",
-            "runCommand",
-            "subagents",
-            "userQuestions",
-            "fileEdit",
-            "viewFile",
-            "writeToFile",
-            "grepSearch",
-            "listDir",
-            "generateImage",
-            "searchWeb",
-            "readUrlContent",
-            "manageTask",
-            "schedule",
-        ] {
-            config["harnessSideTools"][tool] = json!({"enabled":false});
-        }
-        config["policyConfig"]["rules"] =
-            json!([{"tool":"finish","decision":"POLICY_DECISION_ALLOW"}]);
-    }
-}
-
 pub fn validate_output(schema: &Value, output: &str) -> Result<()> {
     let value: Value = serde_json::from_str(output).context("structured result is not JSON")?;
     let validator = jsonschema::validator_for(schema)
@@ -152,33 +103,6 @@ pub fn validate_output(schema: &Value, output: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn instruction_layers_and_tool_disabling_are_explicit() {
-        let (server, mut thread, _) = crate::tests::fixture();
-        let root = server.store.root.clone();
-        configure(&mut thread, &json!({"baseInstructions":"BASE", "developerInstructions":"APP", "config":{"tools_disabled":true}})).unwrap();
-        thread.collaboration_mode = "plan".into();
-        let mut config =
-            json!({"tools":[{"name":"run_command"}],"harnessSideTools":{},"policyConfig":{}});
-        native(&thread, &mut config, &[]);
-        let parts = &config["systemInstructions"]["custom"]["part"];
-        assert_eq!(parts[0]["text"], "BASE");
-        assert!(parts[1]["text"].as_str().unwrap().contains("APP"));
-        assert!(parts[2]["text"].as_str().unwrap().contains("Plan mode"));
-        assert_eq!(config["tools"], json!([]));
-        assert_eq!(config["harnessSideTools"]["viewFile"]["enabled"], false);
-        assert_eq!(config["skillsConfig"]["enabled"], false);
-        configure(&mut thread, &json!({"baseInstructions":null})).unwrap();
-        native(&thread, &mut config, &[]);
-        assert!(config["systemInstructions"].get("custom").is_none());
-        assert_eq!(
-            config["systemInstructions"]["appended"]["appendedSections"][0]["content"],
-            "APP"
-        );
-        drop(server);
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn schema_rejects_invalid_outputs_and_external_references() {

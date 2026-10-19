@@ -1,3 +1,5 @@
+// Historical ACP SDK probe retained for evidence; incompatible with App core.
+throw new Error("RETIRED: this test targets the ACP 1.4.0 WebSocket/local-provider SDK. It cannot run against App 2.24.0 language_server. Use scripts/check-app-core.mjs --live for bounded App core lifecycle coverage.");
 // Native Google protocol fixture + real sandbox + independent Guardian module.
 // Default: deterministic Codex protocol fixture, zero paid calls. --live: two real Codex reviews.
 import assert from 'node:assert/strict';

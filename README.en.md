@@ -10,7 +10,7 @@ This project provides **an app server whose behavior is as close to Codex as pra
 
 **This project draws heavily on, and reuses, [OpenAI Codex](https://github.com/openai/codex) implementations. It was itself vibe-coded with Codex.** Codex informed the protocol and behavior; its CLI provides the OS sandbox and automatic-review backend; the Guardian assessment code is adapted from upstream Codex. See [Codex references and development](#codex-references-and-development) for the distinctions and attribution.
 
-Currently supported: **Linux x86_64 / WSL2**, with **`localharness_external` 1.4.0** pinned. This is an independent community project, unaffiliated with Google or OpenAI. It implements a subset of the Codex-style protocol, not full API, prompt, or model-behavior compatibility.
+Currently supported: **Linux x86_64 / WSL2**, with **Antigravity App 2.24.0's `language_server`** pinned. Execution uses the App's native Cascade service; the SDK / ACP `localharness_external` backend is no longer launched. This is an independent community project, unaffiliated with Google or OpenAI. It implements a subset of the Codex-style protocol, not full API, prompt, or model-behavior compatibility.
 
 [Quick start](#quick-start) · [Sandbox and approvals](#sandbox-and-approvals) · [Tools](#tools-and-commands) · [Instructions and skills](#instructions-and-skills) · [Goals](#persistent-goals) · [Subagents](#subagents-and-independent-workers) · [Client API](#client-api) · [Protocol reference](docs/protocol.md)
 
@@ -35,9 +35,9 @@ Currently supported: **Linux x86_64 / WSL2**, with **`localharness_external` 1.4
 ### 1. Install dependencies
 
 - A Rust toolchain supporting the 2024 edition.
-- The supported Google `localharness_external` binary, obtained separately.
+- The `language_server` from the Antigravity App 2.24.0 Linux x86_64 package, obtained separately.
 - Codex CLI for the OS sandbox. Automatic review also requires Codex login and access to the review model.
-- A Google API key, or personal-account credentials that have completed upstream onboarding.
+- A Google account authenticated through the native App login flow.
 - Bash and util-linux `setsid`, normally available on Linux / WSL, for cancellable command process groups.
 
 The production service does not need Node.js or Python. Node.js 24+ is used only for examples, source export, and optional integration checks.
@@ -53,45 +53,38 @@ Codex 0.162.1 has been tested with this project. Other versions require sandbox 
 
 ### 2. Set up the native runtime
 
-Download [Google's Linux x86_64 1.4.0 archive](https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.4.0-linux-x86_64.zip), extract it, and point the environment variable at `localharness_external`:
+Obtain the App 2.24.0 Linux x86_64 package from the [official Antigravity download page](https://antigravity.google/download) and extract its `language_server`. App, CLI, and ACP versions and binaries are not interchangeable:
 
 ```sh
-export AGY_EXTERNAL_BINARY="/absolute/path/to/localharness_external"
-chmod +x "$AGY_EXTERNAL_BINARY"
+export AGY_APP_CORE_BINARY="/absolute/path/to/language_server"
+chmod +x "$AGY_APP_CORE_BINARY"
 export AGY_APP_SERVER_HOME="$HOME/.local/state/antigravity-app-server"
 ```
 
 Startup checks the runtime against the pinned SHA-256 and rejects other builds:
 
 ```text
-30c80540147b7f6ce9157f8fbfce1ce5308e96b10602d4236f9108463a839373
+4a3854e31d77200ccb1cd4c44cb5c01611c07d81006586b40c1ab1f2c9e80713
 ```
 
 This repository does not distribute Google's binaries, SDK, or credentials. Obtain and use them under their upstream terms.
 
 ### 3. Configure model access
 
-Choose one of these methods:
+Start native login, open the printed Google OAuth URL, and paste the authorization code if requested. The command exits after native token creation; Ctrl-C cancels:
 
 ```sh
-# Supply the real value locally; do not commit it.
-export GEMINI_API_KEY="YOUR_API_KEY"
+./target/release/antigravity-app-server --login
 ```
 
-```sh
-# Existing personal-account credentials produced by upstream login.
-unset GEMINI_API_KEY
-export AGY_PERSONAL_CREDENTIALS="/absolute/private/path/acp_token.json"
-```
-
-Personal OAuth is experimental and takes precedence over an API key. The server does not provide first-time login, enterprise onboarding, or an account-management UI.
+The App core owns authentication. The authentication home defaults to `$AGY_APP_SERVER_HOME/app-auth`; set `AGY_APP_AUTH_HOME` to use another dedicated directory. The native token is `.gemini/jetski-standalone-oauth-token` beneath it. Login and ordinary service runs must use the same authentication home. Legacy ACP `acp_token.json`, `AGY_PERSONAL_CREDENTIALS`, and API-key proxy settings are no longer execution inputs.
 
 ```sh
 ./target/release/antigravity-app-server --doctor
 ./target/release/antigravity-app-server
 ```
 
-`--doctor` checks dependencies, the Codex connection, login status, model listings, and review policy. **It does not run inference** and cannot establish that every listed model is callable with the current account.
+`--doctor` checks the core binary hash, native token-file presence, and Codex review connectivity **without inference or Google authentication/model verification**. The running App service supplies the account model catalog.
 
 The service reads JSON-RPC from stdin. To try a minimal client:
 
@@ -111,12 +104,14 @@ Your client / IDE / Web UI
    ├─ Permission policy ── Codex OS sandbox ── Commands and file changes
    ├─ Approval boundary ── Human client / independent Codex review session
    ├─ MCP bridge ── User-configured local or remote services
-   └─ Local native connection ── localharness_external ── Model provider
+   └─ Local Connect RPC ── App language_server ── Model provider
 ```
 
 Google's runtime runs the actual agent loop. The wrapper preserves native command arguments, output, and history, converts execution state into client events, and enforces permissions before execution. Models, tool availability, and quotas remain subject to upstream constraints.
 
 Each server process exclusively owns its state directory and can host multiple threads. Do not share one `AGY_APP_SERVER_HOME` between running processes. stdout contains only protocol messages; diagnostics go to stderr. Closing stdin stops the service.
+
+New threads carry `app-core-v1` and persist native App trajectories. Legacy SDK threads remain readable but cannot resume execution; create a new App thread to continue work. Changing source does not automatically replace deployed services or change a client's default backend.
 
 ## Sandbox and approvals
 
@@ -232,7 +227,9 @@ project_doc_fallback_filenames = ["TEAM_RULES.md"]
 project_root_markers = [".git"]
 ```
 
-Instructions are appended to Google's native base prompt; Codex's system prompt does not replace it. `baseInstructions` explicitly replaces the base prompt; `developerInstructions` adds application instructions. Google's runtime does not have an identical OpenAI developer-role hierarchy, so this does not establish full role-precedence equivalence.
+Instructions are appended through the App's declarative prompt sections to selected Google built-in sections. `baseInstructions` explicitly replaces those built-in sections; `developerInstructions` adds a custom application section. Google's runtime does not have an identical OpenAI developer-role hierarchy, so this does not establish full role-precedence equivalence.
+
+Automatic App inheritance of rules, skills, MCP, hooks, plugins, agents, and workflows is disabled. The wrapper explicitly supplies discovered skills, MCP bridges, and approval hooks for each thread, so personal extensions in the authentication home do not silently change tools or permissions. Native tools and prompt sections are selected declaratively, retaining execution hooks needed for message delivery, context summaries, and invocation limits.
 
 Edits take effect on the next native connection, not on an ordinary next turn or unchanged resume of a loaded thread. To refresh, unload an idle persistent thread and resume it. This does not implement Codex's complete trust/profile/project configuration stack or automatically discover `GEMINI.md`.
 
@@ -276,7 +273,7 @@ The server starts another turn when the Goal is `active` and the thread is loade
 
 Resume with `thread/goal/set` and `status: "active"`; remove with `thread/goal/clear`. Use `turn/interrupt` to stop the current turn immediately. Unloading stops scheduling but preserves a persistent thread's Goal.
 
-`tokenBudget` prevents continuation based on reported usage; it is not a hard per-token cutoff, and the current turn may exceed it. A native `budget`, such as `maxModelCalls` or `maxTotalTokens`, can also be supplied at thread creation. Codex review usage is counted separately. If usage becomes unknown, a budgeted Goal stops automatic continuation. Extended time/cost limits and registered verifiers are not implemented; `complete` is not independent verification.
+Goal `tokenBudget` prevents continuation based on reported usage; it is not a hard per-token cutoff, and the current turn may exceed it. A token-budgeted Goal stops automatic continuation when App usage is unavailable. Thread `budget.maxModelCalls` / `maxToolCalls` bound model generations and tool calls. `maxInputTokens`, `maxOutputTokens`, and `maxTotalTokens` check cumulative usage in an App post-invocation hook and stop the next generation and subsequent turns when exhausted. Lifetime and forward scopes survive restart. The current model generation and its tools may exceed the limit; this is not a per-token hard cutoff. Model-call counts cover logical generations in the current root trajectory, excluding independent reviews and child threads. Extended time/cost limits and registered verifiers are not implemented; `complete` is not independent verification.
 
 ## Subagents and independent workers
 
@@ -297,7 +294,7 @@ Defaults: at most four running agents including the root, and one child level. C
 
 Ordinary messages do not wake an idle parent; use `wait_agent` to wait for results. Interrupting a root also interrupts its active children. Unloading a parent requires idle children and unloads them too. Persistent children can resume for follow-up tasks; unloaded ephemeral children cannot. Unknown execution outcomes require the existing reconcile flow and are not automatically replayed.
 
-Native built-in subagent tools remain disabled: version 1.4.0 `kill` deregisters a child, and the public protocol lacks identity-preserving targeted interruption and queue-only messaging. The wrapper adds management tools, not a second model-execution loop. It follows Codex V2 collaboration semantics without legacy `send_input` / `wait` / `close_agent` aliases or full Codex configuration/history compatibility. Usage and native budgets are per thread; a parent Goal's token budget does not aggregate child usage.
+App built-in subagent scheduling remains disabled so public collaboration tools share the identity, queue, and permission semantics described above. The wrapper supplies management tools; the App runs each thread's model loop. Legacy `send_input` / `wait` / `close_agent` aliases and full Codex configuration/history compatibility are not provided. Usage and budgets are per thread; a parent Goal's token budget does not aggregate child usage.
 
 Clients can also create one-off summary workers directly:
 
@@ -312,7 +309,7 @@ Clients can also create one-off summary workers directly:
 }
 ```
 
-`tools_disabled` is enforced during configuration and dispatch, not only through prompts; structured `finish` remains available. Ephemeral threads are excluded from persistent listings. Their local native temporary state is cleaned on unload or normal exit; leftovers from forced termination are cleaned when the state directory is next opened. **Unloaded ephemeral threads cannot resume.** This does not promise provider-side zero retention.
+`tools_disabled` is enforced during configuration and dispatch, not only through prompts. `outputSchema` uses structured-output instructions and final JSON validation, not the SDK's `finishToolSchemaJson`. Ephemeral threads are excluded from persistent listings. Their local native temporary state is cleaned on unload or normal exit; leftovers from forced termination are cleaned when the state directory is next opened. **Unloaded ephemeral threads cannot resume.** This does not promise provider-side zero retention.
 
 Independent threads do not imply filesystem isolation: threads sharing a working directory can access the same files within their permissions. Clients should prepare separate directories or worktrees for isolated parallel changes. Independent server processes also need separate state directories.
 
@@ -350,25 +347,21 @@ See the [protocol reference](docs/protocol.md) for fields, input types, JSON Sch
 
 | Environment variable | Purpose |
 | --- | --- |
-| `AGY_EXTERNAL_BINARY` | Required path to the supported Google runtime |
-| `AGY_APP_SERVER_HOME` | State directory; legacy `AGY_HARNESS_HOME` also accepted; otherwise `.antigravity-app-server` under the current directory |
-| `GEMINI_API_KEY` | Google API key |
-| `AGY_PERSONAL_CREDENTIALS` | Existing personal OAuth JSON; takes precedence over API key |
-| `AGY_API_BASE_URL` | Alternative API-key endpoint, normally only for local fixtures |
+| `AGY_APP_CORE_BINARY` | Required path to the hash-pinned App 2.24.0 `language_server` |
+| `AGY_APP_SERVER_HOME` | Service state directory; legacy `AGY_HARNESS_HOME` also accepted; set an explicit absolute path |
+| `AGY_APP_AUTH_HOME` | Dedicated authentication home; defaults to `app-auth` beneath the service state directory |
 | `CODEX_HOME` | Codex account/configuration and global instructions; default `~/.codex` |
 | `AGY_CODEX_BINARY` | Shared override for the Codex executable |
 | `AGY_CODEX_REVIEW_BINARY` / `AGY_CODEX_SANDBOX_BINARY` | Separate executable overrides for review and sandbox |
 | `AGY_CODEX_CONNECTION` | `auto` / `daemon` / `stdio`; default `auto` |
 | `AGY_CODEX_SOCKET` | Explicit Codex daemon Unix socket |
 | `AGY_SKILLS_ROOT` | Alternative user-level skill directory |
-| `AGY_MODEL_REQUEST_MAX_BYTES` | Personal OAuth request size limit; default 512 MiB |
-| `AGY_MODEL_IDLE_TIMEOUT_SECS` | Personal OAuth timeout without response data; default 600 seconds |
 
 Codex discovery checks explicit settings, PATH, and common user installation locations. `auto` prefers an existing daemon under the current Codex home, otherwise starts a private stdio process. Fallback occurs only before model calls; it does not restart shared services or automatically retry paid calls.
 
-Personal OAuth requests are buffered in anonymous temporary files and forwarded as streams, requiring temporary disk space. Streams that continue producing data have no total-duration deadline. Images are preprocessed to a 2576-pixel side and a 5 MiB Base64 budget. See the protocol documentation for further attachment limits.
+The App core owns model requests, OAuth refresh, and upstream networking. The wrapper no longer runs a model HTTP proxy. `AGY_EXTERNAL_BINARY`, `AGY_PERSONAL_CREDENTIALS`, `AGY_API_BASE_URL`, `AGY_MODEL_REQUEST_MAX_BYTES`, and `AGY_MODEL_IDLE_TIMEOUT_SECS` do not control current execution; API-key environment variables are removed before launching the core. Images are still preprocessed to a 2576-pixel side and a 5 MiB Base64 budget. See the protocol documentation for further attachment limits.
 
-State includes user messages, tool arguments/results, native history, and approval evidence, and may contain sensitive information. `transport.jsonl` records only sizes, timing, stages, and error metadata, not request bodies or credentials. Protect the state directory and do not publish raw sessions or `.tmp` probe reports.
+State includes user messages, tool arguments/results, native history, and approval evidence, and may contain sensitive information. Exported App configuration events redact authentication, header, and environment values; conversation content remains private. The old proxy's `transport.jsonl` no longer describes current model requests. Protect both state and authentication directories; do not publish raw sessions or `.tmp` probe reports.
 
 ## Development, validation, and publication
 
@@ -380,21 +373,7 @@ cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-With the native runtime and Codex installed, run local model-fixture integration checks:
-
-```sh
-cargo build --locked
-node scripts/check-native-permissions.mjs
-node scripts/check-guardian.mjs
-node scripts/check-native-steer.mjs
-node scripts/check-models-goal.mjs
-node scripts/check-native-instructions.mjs
-# Subagent lifecycle, independent-session recovery, and inherited sandbox;
-# local model fixtures, no inference charges.
-node scripts/check-native-subagents.mjs
-```
-
-These default scripts do not consume real model quota. Unit tests, native requests against model fixtures, and real-account checks provide different evidence; release notes should identify which were run. See [CONTRIBUTING](CONTRIBUTING.md) for contribution practices and explicit live checks.
+Legacy model-fixture scripts, including `check-native-*`, `check-models-goal.mjs`, and `check-guardian.mjs`, depend on the removed SDK / API-key proxy and must be migrated or retired before use as App-backend checks. Validate Connect streaming, native login, tool approvals, and real-account execution separately. Unit tests, protocol probes, and real model calls provide different evidence. The commands above are check entrypoints, not a claim that all migration checks passed or deployed defaults changed. See [CONTRIBUTING](CONTRIBUTING.md) for contribution practices.
 
 Export public source through the allowlist:
 
