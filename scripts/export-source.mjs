@@ -1,7 +1,6 @@
 // Explicit public-source allowlist. Never copies .git or developer evidence.
 import {mkdir, readdir, readFile, writeFile, lstat} from 'node:fs/promises';
 import path from 'node:path';
-import {createHash} from 'node:crypto';
 const root=path.resolve(import.meta.dirname,'..');
 const destination=path.join(root,'.tmp',`public-source-${Date.now()}`);
 const entries=['Cargo.toml','Cargo.lock','LICENSE','NOTICE','README.md','SECURITY.md','CONTRIBUTING.md','.gitignore','src','examples','docs/guardian.md','docs/protocol.md','scripts/export-source.mjs','scripts/check-guardian.mjs','scripts/check-native-permissions.mjs','scripts/check-native-steer.mjs','scripts/check-models-goal.mjs','scripts/check-native-instructions.mjs','scripts/check-native-subagents.mjs','test/spec/rpc-client.mjs'];
@@ -14,14 +13,13 @@ async function collect(relative){
  else throw Error(`Unsupported file: ${relative}`);
 }
 for(const entry of entries)await collect(entry);
-const content=new Map(),manifest={};
+const content=new Map();
 for(const file of files){
  const bytes=await readFile(path.join(root,file)),text=bytes.toString('utf8');
  if(/-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----|\bAIza[0-9A-Za-z_-]{35}\b|\bsk-(?:proj-)?[A-Za-z0-9_-]{40,}|\/home\/andantex\/|\/mnt\/[a-z]\/Users\//.test(text))throw Error(`Review sensitive content before export: ${file}`);
- content.set(file,bytes);manifest[file]=createHash('sha256').update(bytes).digest('hex');
+ content.set(file,bytes);
 }
 await mkdir(path.dirname(destination),{recursive:true});
 await mkdir(destination); // Never overwrite a previous export.
 for(const [file,bytes] of content){const target=path.join(destination,file);await mkdir(path.dirname(target),{recursive:true});await writeFile(target,bytes,{flag:'wx'});}
-await writeFile(path.join(destination,'SOURCE-MANIFEST.json'),JSON.stringify(manifest,null,2)+'\n',{flag:'wx'});
 console.log(JSON.stringify({directory:destination,files:files.length,gitHistoryIncluded:false,viewerIncluded:false},null,2));
