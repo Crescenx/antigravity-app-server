@@ -116,6 +116,21 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+fn recover_interrupted_thread(thread: &mut Thread) -> bool {
+    if thread.status != "unknown"
+        || !thread
+            .turn
+            .as_ref()
+            .is_some_and(|t| t["interruptRequested"] == true)
+    {
+        return false;
+    }
+    thread.status = "idle".into();
+    thread.revision += 1;
+    thread.checkpoint_turn();
+    true
+}
+
 impl Server {
     async fn configure_thread(&mut self, thread: &mut Thread, params: &Value) -> Result<()> {
         let selecting = !params["model"].is_null()
@@ -595,6 +610,25 @@ impl Server {
                 let mut thread = self.store.load(text(&p, "threadId")?)?;
                 if thread.executable().is_err() {
                     return Ok(compat::response(&thread, Value::Null));
+                }
+                // A stopped worker must not leave an explicitly cancelled session
+                // permanently locked. Preserve the unknown old outcome; never replay it.
+                if !self.connections.contains_key(&thread.id)
+                    && recover_interrupted_thread(&mut thread)
+                {
+                    self.store.save(&thread)?;
+                    if let Some(turn) = &thread.turn {
+                        notify(
+                            &self.output,
+                            "turn/completed",
+                            json!({"threadId":thread.id,"turn":compat::turn(turn)}),
+                        );
+                    }
+                    notify(
+                        &self.output,
+                        "thread/status/changed",
+                        json!({"threadId":thread.id,"status":{"type":"idle"}}),
+                    );
                 }
                 let previous = thread.clone();
                 self.configure_thread(&mut thread, &p).await?;

@@ -1,6 +1,27 @@
 use super::*;
 
 #[test]
+fn reopening_a_stopped_cancelled_thread_preserves_unknown_history_without_replay() {
+    let (_, mut thread, _) = fixture();
+    thread.status = "unknown".into();
+    thread.turn =
+        Some(json!({"id":"cancelled","status":"unknown","interruptRequested":true,"items":[]}));
+    let revision = thread.revision;
+    assert!(recover_interrupted_thread(&mut thread));
+    assert_eq!(thread.status, "idle");
+    assert_eq!(thread.revision, revision + 1);
+    assert_eq!(thread.turn.as_ref().unwrap()["status"], "unknown");
+    assert_eq!(
+        compat::turn(thread.turn.as_ref().unwrap())["status"],
+        "failed"
+    );
+    assert!(!recover_interrupted_thread(&mut thread));
+    thread.status = "unknown".into();
+    thread.turn.as_mut().unwrap()["interruptRequested"] = json!(false);
+    assert!(!recover_interrupted_thread(&mut thread));
+}
+
+#[test]
 fn native_nonzero_exit_is_failed() {
     for (code, status) in [(0, "completed"), (1, "failed"), (-1, "failed")] {
         let item = compat::tool_item(
