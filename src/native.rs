@@ -16,6 +16,103 @@ use tokio::{
 pub const APP_SHA256: &str = "4a3854e31d77200ccb1cd4c44cb5c01611c07d81006586b40c1ab1f2c9e80713";
 const SERVICE: &str = "/exa.language_server_pb.LanguageServerService/";
 const MAX_FRAME: usize = 64 * 1024 * 1024;
+fn hook_executable() -> PathBuf {
+    // The running inode survives an atomic rebuild; current_exe() may end in
+    // " (deleted)" and is not an executable pathname after replacement.
+    PathBuf::from(format!("/proc/{}/exe", std::process::id()))
+}
+
+#[cfg(test)]
+mod executable_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancellation_confirms_idle_despite_unconsumed_input_and_late_replies() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new()
+                    .fallback(|| async { axum::Json(json!({"status":"CASCADE_RUN_STATUS_IDLE"})) }),
+            )
+            .await
+            .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut native = Native {
+            process: Process {
+                child: Command::new("/bin/sleep")
+                    .arg("30")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap(),
+                endpoint: json!({"baseUrl":format!("http://{address}"),"csrf":"fixture"}),
+                log_task: tokio::spawn(async {}),
+            },
+            config: json!({"cascadeId":"fixture"}),
+            budget: crate::native_budget::Budget::open(
+                dir.path(),
+                None,
+                &json!({"modelCallCount":0}),
+                0,
+            )
+            .unwrap(),
+            budget_stop: None,
+            cancelling: false,
+            state: crate::native_state::NativeState::new("fixture"),
+            events: rx,
+            stream_task: tokio::spawn(async {}),
+            bridge: crate::native_bridge::Bridge::open("fixture", vec![], tx)
+                .await
+                .unwrap(),
+            queued: VecDeque::new(),
+            min_step: Some(0),
+            saw_input: false,
+            pending_inputs: 2,
+            seen_inputs: Default::default(),
+            pending: Default::default(),
+            interactions: Default::default(),
+        };
+        native.send(json!({"haltRequest":true})).await.unwrap();
+        native
+            .send(json!({"toolResponse":{"id":"already-cancelled"}}))
+            .await
+            .unwrap();
+        let terminal = native.next().await.unwrap();
+        assert_eq!(
+            terminal["trajectoryStateUpdate"]["state"],
+            "STATE_CANCELLED"
+        );
+        assert_eq!(native.pending_inputs, 0);
+        drop(native);
+        server.abort();
+    }
+    #[test]
+    fn proc_executable_survives_replaced_binary() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::process::CommandExt;
+        assert_eq!(
+            std::fs::metadata(super::hook_executable()).unwrap().ino(),
+            std::fs::metadata("/proc/self/exe").unwrap().ino()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("sleep");
+        std::fs::copy("/bin/sleep", &executable).unwrap();
+        let mut child = std::process::Command::new(&executable)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::remove_file(&executable).unwrap();
+        let result = std::process::Command::new(format!("/proc/{}/exe", child.id()))
+            .arg0("sleep")
+            .arg("0")
+            .status();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(result.unwrap().success());
+    }
+}
 pub fn verify_binary(path: &Path) -> Result<()> {
     let mut file = std::fs::File::open(path)?;
     let mut hash = Sha256::new();
@@ -196,6 +293,7 @@ pub struct Native {
     config: Value,
     budget: crate::native_budget::Budget,
     budget_stop: Option<String>,
+    cancelling: bool,
     state: crate::native_state::NativeState,
     events: mpsc::UnboundedReceiver<Result<Value>>,
     stream_task: tokio::task::JoinHandle<()>,
@@ -268,11 +366,7 @@ impl Native {
         file.write_all(&serde_json::to_vec(&bridge.endpoint())?)?;
         let hook_command = format!(
             "{} --app-core-hook {}",
-            permissions::shell_quote(
-                std::env::current_exe()?
-                    .to_str()
-                    .context("executable path")?
-            )?,
+            permissions::shell_quote(hook_executable().to_str().context("executable path")?)?,
             permissions::shell_quote(endpoint_path.to_str().context("hook config path")?)?
         );
         let hook_path = data.join("hooks.json");
@@ -346,6 +440,7 @@ impl Native {
                 config,
                 budget,
                 budget_stop: None,
+                cancelling: false,
                 state,
                 events,
                 stream_task,
@@ -366,6 +461,7 @@ impl Native {
         if let Some(input) = event.get("userInput") {
             let starting = self.min_step.is_none();
             if starting {
+                self.cancelling = false;
                 if let Some(cap) = self.budget.prepare_turn()? {
                     self.config["cascadeConfig"]["executorConfig"]["maxGeneratorInvocations"] =
                         json!(cap);
@@ -406,6 +502,8 @@ impl Native {
             self.queued
                 .retain(|event| event["trajectoryStateUpdate"]["state"] != "STATE_FULLY_IDLE");
         } else if event.get("haltRequest").is_some() {
+            self.cancelling = true;
+            self.pending_inputs = 0;
             self.bridge.cancel();
             self.pending.clear();
             rpc(
@@ -414,6 +512,18 @@ impl Native {
                 json!({"cascadeId":id,"killBackgroundTasks":true}),
             )
             .await?;
+            let snapshot = rpc(
+                &self.process.endpoint,
+                "GetCascadeTrajectory",
+                json!({"cascadeId":id}),
+            )
+            .await?;
+            if snapshot["status"] == "CASCADE_RUN_STATUS_IDLE" || snapshot["status"] == 1 {
+                self.queued.push_back(json!({"trajectoryStateUpdate":{"trajectoryId":id,"state":"STATE_CANCELLED","fullyIdle":true,"error":null}}));
+            }
+        } else if self.cancelling {
+            // Late replies to callbacks cancelled by halt are not transport failures.
+            return Ok(());
         } else if let Some(response) = event.get("callHookResponse") {
             self.bridge
                 .reply(text(response, "requestId")?, response.clone())?;
@@ -550,7 +660,7 @@ impl Native {
                         }
                     }
                     if let Some(state) = event.get_mut("trajectoryStateUpdate") {
-                        if self.min_step.is_none() || !self.saw_input {
+                        if self.min_step.is_none() || (!self.saw_input && !self.cancelling) {
                             continue;
                         }
                         if state["state"] == "STATE_FULLY_IDLE" && self.pending_inputs > 0 {

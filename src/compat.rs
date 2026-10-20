@@ -178,6 +178,11 @@ pub fn thread(thread: &Thread) -> Value {
             turns.push(current.clone());
         }
     }
+    for turn in &mut turns {
+        for item in turn["items"].as_array_mut().into_iter().flatten() {
+            crate::subagents::display_mail(thread, item);
+        }
+    }
     let status = match thread.status.as_str() {
         "running" => json!({"type":"active","activeFlags":[]}),
         "unknown" => json!({"type":"systemError"}),

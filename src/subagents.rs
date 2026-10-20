@@ -145,6 +145,44 @@ fn mailbox_text(mail: &Value) -> String {
         mail["message"].as_str().unwrap_or("")
     )
 }
+
+pub fn display_mail(thread: &Thread, item: &mut Value) {
+    let Some(id) = item["clientId"]
+        .as_str()
+        .and_then(|s| s.strip_prefix("mail:"))
+    else {
+        return;
+    };
+    let Some(mail) = thread.subagents.mailbox.iter().find(|m| m["id"] == id) else {
+        return;
+    };
+    // Only a receipt tied to our own mailbox changes the message's attribution.
+    item["type"] = json!("collabAgentToolCall");
+    item["tool"] = json!("sendMessage");
+    item["status"] = json!("completed");
+    item["senderThreadId"] = mail.get("senderThreadId").cloned().unwrap_or(json!(""));
+    item["senderAgentPath"] = mail["sender"].clone();
+    item["receiverThreadIds"] = json!([thread.id]);
+    let mut body = item["text"].as_str().unwrap_or("").to_owned();
+    if mail["kind"] == "FINAL_ANSWER" {
+        if let Some(raw) = mail["message"].as_str() {
+            if let Ok(value) = serde_json::from_str::<Value>(raw) {
+                if let Some(text) = value["completed"].as_str().or(value["errored"].as_str()) {
+                    body = body.replace(raw, text);
+                }
+            }
+        }
+    }
+    item["text"] = json!(body);
+    item["prompt"] = json!(format!(
+        "{} → {}\n\n{}",
+        mail["sender"].as_str().unwrap_or("agent"),
+        path(thread),
+        body
+    ));
+    item["result"] = json!({"sender":mail["sender"],"type":mail["kind"],"message":item["text"]});
+    item.as_object_mut().unwrap().remove("content");
+}
 fn pending(thread: &Thread) -> Vec<Value> {
     thread
         .subagents
@@ -585,7 +623,7 @@ impl Server {
         if thread.status == "running" {
             self.steer(&json!({"threadId":id,"expectedTurnId":thread.turn.as_ref().unwrap()["id"],"clientUserMessageId":format!("mail:{}",mail[0]["id"].as_str().unwrap()),"input":input})).await?;
         } else {
-            Box::pin(self.request("turn/start", json!({"threadId":id,"input":input}))).await?;
+            Box::pin(self.request("turn/start", json!({"threadId":id,"clientUserMessageId":format!("mail:{}",mail[0]["id"].as_str().unwrap()),"input":input}))).await?;
         }
         Ok(())
     }
@@ -623,7 +661,13 @@ impl Server {
         let mut parent = self.store.load(parent_id)?;
         let id = format!("completion:{}:{turn_id}", thread.id);
         if !parent.subagents.mailbox.iter().any(|m| m["id"] == id) {
-            parent.subagents.mailbox.push(json!({"id":id,"sender":path(thread),"kind":"FINAL_ANSWER","message":status(thread).to_string(),"state":"queued"}));
+            let result = status(thread);
+            let message = result["completed"]
+                .as_str()
+                .or(result["errored"].as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| result.to_string());
+            parent.subagents.mailbox.push(json!({"id":id,"sender":path(thread),"senderThreadId":thread.id,"kind":"FINAL_ANSWER","message":message,"state":"queued"}));
             self.store.save(&parent)?;
         }
         thread.subagents.reported_turn = Some(turn_id);
@@ -662,6 +706,30 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_reply_is_plain_text_and_mail_has_agent_attribution() {
+        let (server, parent, mut child) = setup();
+        child.turn = Some(
+            json!({"id":"done","status":"completed","items":[{"type":"agentMessage","text":"First line\nSecond line"}]}),
+        );
+        server.agent_finished(&mut child).unwrap();
+        let saved = server.store.load(&parent.id).unwrap();
+        let mail = &saved.subagents.mailbox[0];
+        assert_eq!(mail["message"], "First line\nSecond line");
+        let mut item = json!({"type":"userMessage","clientId":format!("mail:{}",mail["id"].as_str().unwrap()),"text":mailbox_text(mail),"content":[]});
+        display_mail(&saved, &mut item);
+        assert_eq!(item["type"], "collabAgentToolCall");
+        assert_eq!(item["senderThreadId"], child.id);
+        assert!(
+            item["result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("First line\nSecond line")
+        );
+        let mut unrelated = json!({"type":"userMessage","clientId":"mail:untrusted"});
+        display_mail(&saved, &mut unrelated);
+        assert_eq!(unrelated["type"], "userMessage");
+    }
     fn setup() -> (Server, Thread, Thread) {
         let (server, mut parent, _) = crate::tests::fixture();
         parent.status = "running".into();

@@ -1030,6 +1030,7 @@ impl Server {
                 item["content"] =
                     json!([{"type":"text","text":step["text"].as_str().unwrap_or("")}]);
                 steer::user_item(&mut thread, step, &mut item);
+                subagents::display_mail(&thread, &mut item);
             }
             for item in compat::message_items(item) {
                 let item_id = item["id"].as_str().unwrap().to_owned();
