@@ -1461,3 +1461,202 @@ async fn sdk_threads_remain_readable_but_never_execute_after_migration() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn native_thinking_streams_as_reasoning_without_empty_messages() {
+    let (mut server, mut thread, mut output) = fixture();
+    thread.turn = Some(json!({"id":"turn","status":"inProgress","items":[]}));
+    thread.native_command_receipts.insert(
+        "command".into(),
+        json!({
+            "trajectoryId":thread.id,"turnId":"turn","state":"running",
+            "original":{"CommandLine":"pwd","Cwd":thread.cwd},
+            "modified":{"CommandLine":"pwd"}
+        }),
+    );
+    server.store.save(&thread).unwrap();
+    let (commands, _rx) = mpsc::channel(4);
+    server.connections.insert(
+        thread.id.clone(),
+        Connection {
+            pid: None,
+            generation: "test".into(),
+            commands,
+        },
+    );
+    let mut state = native_state::NativeState::new(&thread.id);
+    let mut updates = vec![
+        (0, json!({"status":2,"plannerResponse":{"toolCalls":[{}]}})),
+        (
+            0,
+            json!({"status":2,"plannerResponse":{"thinking":"Inspect"}}),
+        ),
+        (
+            0,
+            json!({"status":2,"plannerResponse":{"thinking":"Inspect files"}}),
+        ),
+        // Reconnect replay must not append the same summary again.
+        (
+            0,
+            json!({"status":2,"plannerResponse":{"thinking":"Inspect files"}}),
+        ),
+        // A non-prefix replacement must replace the summary, not concatenate it.
+        (
+            0,
+            json!({"status":2,"plannerResponse":{"thinking":"Check files"}}),
+        ),
+        (
+            0,
+            json!({"status":3,"plannerResponse":{"thinking":"Check files","toolCalls":[{}]}}),
+        ),
+        (
+            1,
+            json!({"status":3,"runCommand":{"commandLine":"pwd","combinedOutput":"/workspace","exitCode":0}}),
+        ),
+        (2, json!({"status":3,"plannerResponse":{"toolCalls":[{}]}})),
+        (
+            3,
+            json!({"status":3,"viewFile":{"filePath":"/workspace/file"}}),
+        ),
+        (
+            4,
+            json!({"status":2,"plannerResponse":{"thinking":"Summarize","response":"Found"}}),
+        ),
+        (
+            4,
+            json!({"status":3,"plannerResponse":{"thinking":"Summarize","response":"Found files"}}),
+        ),
+    ];
+    for (index, step) in updates.drain(..) {
+        let update = json!({"trajectoryId":"native","mainTrajectoryUpdate":{"stepsUpdate":{
+            "totalLength":index+1,"indices":[index],"steps":[step]
+        }}});
+        for event in state
+            .apply(&update)
+            .into_iter()
+            .filter(|e| e.get("stepUpdate").is_some())
+        {
+            server
+                .event(RuntimeEvent {
+                    id: thread.id.clone(),
+                    generation: "test".into(),
+                    event: Ok(event),
+                })
+                .await
+                .unwrap();
+        }
+    }
+    let saved = server.store.load(&thread.id).unwrap();
+    let read = server
+        .request("thread/read", json!({"threadId":thread.id}))
+        .await
+        .unwrap();
+    let items = &read["thread"]["turns"][0]["items"];
+    assert_eq!(
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "reasoning",
+            "commandExecution",
+            "dynamicToolCall",
+            "reasoning",
+            "agentMessage"
+        ]
+    );
+    assert_eq!(items[0]["summary"], json!(["Check files"]));
+    assert_eq!(items[0]["content"], json!([]));
+    assert_eq!(items[3]["summary"], json!(["Summarize"]));
+    assert_eq!(items[4]["text"], "Found files");
+    assert_eq!(items[0]["id"], format!("{}:0:reasoning", thread.id));
+    assert_eq!(items[4]["id"], format!("{}:4", thread.id));
+    assert_eq!(*items, saved.turn.as_ref().unwrap()["items"]);
+
+    let mut events = Vec::new();
+    while let Ok(event) = output.try_recv() {
+        events.push(event);
+    }
+    let deltas: Vec<_> = events
+        .iter()
+        .filter(|e| e["method"] == "item/reasoning/summaryTextDelta")
+        .collect();
+    assert_eq!(deltas.len(), 3);
+    assert_eq!(deltas[0]["params"]["delta"], "Inspect");
+    assert_eq!(deltas[1]["params"]["delta"], " files");
+    assert_eq!(deltas[2]["params"]["delta"], "Summarize");
+    assert_eq!(deltas[0]["params"]["summaryIndex"], 0);
+    assert_eq!(deltas[0]["params"]["itemId"], items[0]["id"]);
+    assert!(!events.iter().any(
+        |e| e["params"]["item"]["type"] == "agentMessage" && e["params"]["item"]["text"] == ""
+    ));
+    assert!(events.iter().any(|e|e["method"]=="item/completed" && e["params"]["item"]["id"]==items[0]["id"]));
+    // Reconstruct exactly as a client would, including replacement snapshots.
+    let mut reconstructed: Vec<Value> = Vec::new();
+    for event in &events {
+        let p = &event["params"];
+        if event["method"] == "item/started" || event["method"] == "item/completed" {
+            if let Some(previous) = reconstructed
+                .iter_mut()
+                .find(|i| i["id"] == p["item"]["id"])
+            {
+                *previous = p["item"].clone();
+            } else {
+                reconstructed.push(p["item"].clone());
+            }
+        } else if event["method"] == "item/reasoning/summaryTextDelta" {
+            let item = reconstructed
+                .iter_mut()
+                .find(|i| i["id"] == p["itemId"])
+                .unwrap();
+            item["summary"] = json!([format!(
+                "{}{}",
+                item["summary"][0].as_str().unwrap_or(""),
+                p["delta"].as_str().unwrap()
+            )]);
+        }
+    }
+    assert_eq!(json!(reconstructed), *items);
+}
+
+#[test]
+fn native_message_history_projection_is_idempotent_and_preserves_real_answers() {
+    let model = |id: &str, text: &str, thinking: &str| {
+        json!({"id":id,"type":"agentMessage","text":text,"state":"STATE_DONE",
+        "native":{"source":"SOURCE_MODEL","target":"TARGET_USER","thinking":thinking}})
+    };
+    let old = json!({"id":"turn","status":"completed","items":[
+        model("a","","Inspect files"),
+        {"id":"tool1","type":"commandExecution"},
+        model("b","   ",""),
+        {"id":"tool2","type":"dynamicToolCall"},
+        model("c","Answer","Summary"),
+        {"id":"question","type":"agentMessage","text":"","questions":[{"title":"Choose"}]},
+        {"id":"ordinary","type":"agentMessage","text":"Original client message"}
+    ]});
+    let projected = compat::turn(&old);
+    assert_eq!(
+        projected["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["type"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "reasoning",
+            "commandExecution",
+            "dynamicToolCall",
+            "reasoning",
+            "agentMessage",
+            "agentMessage",
+            "agentMessage"
+        ]
+    );
+    assert_eq!(compat::turn(&projected), projected);
+    assert_eq!(projected["items"][4]["id"], "c");
+    assert_eq!(projected["items"][4]["text"], "Answer");
+    assert_eq!(projected["items"][5]["questions"][0]["title"], "Choose");
+    assert_eq!(old["items"][0]["type"], "agentMessage");
+}

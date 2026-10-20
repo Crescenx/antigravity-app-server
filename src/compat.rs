@@ -99,11 +99,59 @@ pub fn tool_item(step: &Value, id: &str) -> Option<Value> {
     Some(item)
 }
 
+/// A native model step can contain both reasoning and a user-facing response.
+pub fn message_items(item: Value) -> Vec<Value> {
+    if item["type"] != "agentMessage" || item["native"]["source"] != "SOURCE_MODEL" {
+        return vec![item];
+    }
+    let mut items = Vec::new();
+    if let Some(thinking) = item["native"]["thinking"]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+    {
+        items.push(json!({
+            "id":format!("{}:reasoning",item["id"].as_str().unwrap_or("")),
+            "type":"reasoning","summary":[thinking],"content":[],
+            "state":item["state"],"native":item["native"]
+        }));
+    }
+    if item["text"]
+        .as_str()
+        .is_some_and(|text| !text.trim().is_empty())
+        || item["questions"].as_array().is_some_and(|q| !q.is_empty())
+    {
+        items.push(item);
+    }
+    items
+}
+
 pub fn turn(value: &Value) -> Value {
     let mut turn = value.clone();
     if !turn["items"].is_array() {
         turn["items"] = json!([]);
     }
+    // Read old snapshots with the same projection as live events, without rewriting native history.
+    let items = turn["items"].as_array().unwrap();
+    let reasoning_ids: std::collections::BTreeSet<_> = items
+        .iter()
+        .filter(|item| item["type"] == "reasoning")
+        .filter_map(|item| item["id"].as_str())
+        .collect();
+    let projected: Vec<_> = items
+        .iter()
+        .flat_map(|item| {
+            let was_reasoning = item["type"] == "reasoning";
+            let reasoning_ids = &reasoning_ids;
+            message_items(item.clone())
+                .into_iter()
+                .filter(move |mapped| {
+                    was_reasoning
+                        || mapped["type"] != "reasoning"
+                        || !reasoning_ids.contains(mapped["id"].as_str().unwrap_or(""))
+                })
+        })
+        .collect();
+    turn["items"] = json!(projected);
     if turn["status"] == "unknown" {
         turn["status"] = json!("failed");
         turn["error"] = json!({"message":"Native outcome unknown; input was not replayed","codexErrorInfo":null,"additionalDetails":null});

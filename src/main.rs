@@ -1031,62 +1031,103 @@ impl Server {
                     json!([{"type":"text","text":step["text"].as_str().unwrap_or("")}]);
                 steer::user_item(&mut thread, step, &mut item);
             }
-            // Child trajectories have separate ownership; never fold their messages into the root.
-            if step["trajectoryId"] == thread.id && item_type != "nativeStep" {
-                let mut first = true;
-                let mut changed = true;
-                let mut delta = None;
-                if let Some(turn) = &mut thread.turn {
-                    if !turn["items"].is_array() {
-                        turn["items"] = json!([]);
+            for item in compat::message_items(item) {
+                let item_id = item["id"].as_str().unwrap().to_owned();
+                let item_type = item["type"].as_str().unwrap_or("nativeStep").to_owned();
+                // Child trajectories have separate ownership; never fold their messages into the root.
+                if step["trajectoryId"] == thread.id && item_type != "nativeStep" {
+                    let mut first = true;
+                    let mut changed = true;
+                    let mut delta = None;
+                    if let Some(turn) = &mut thread.turn {
+                        if !turn["items"].is_array() {
+                            turn["items"] = json!([]);
+                        }
+                        let items = turn["items"].as_array_mut().unwrap();
+                        if let Some(previous) = items.iter_mut().find(|i| i["id"] == item_id) {
+                            first = false;
+                            changed = previous != &item;
+                            let current_text = if item_type == "reasoning" {
+                                &item["summary"][0]
+                            } else {
+                                &item["text"]
+                            };
+                            let previous_text = if item_type == "reasoning" {
+                                &previous["summary"][0]
+                            } else {
+                                &previous["text"]
+                            };
+                            delta = current_text
+                                .as_str()
+                                .and_then(|current| {
+                                    current.strip_prefix(previous_text.as_str().unwrap_or(""))
+                                })
+                                .map(str::to_owned);
+                            *previous = item.clone();
+                        } else {
+                            items.push(item.clone());
+                        }
                     }
-                    let items = turn["items"].as_array_mut().unwrap();
-                    if let Some(previous) = items.iter_mut().find(|i| i["id"] == item_id) {
-                        first = false;
-                        changed = previous != &item;
-                        delta = item["text"]
-                            .as_str()
-                            .and_then(|current| {
-                                current.strip_prefix(previous["text"].as_str().unwrap_or(""))
-                            })
-                            .map(str::to_owned);
-                        *previous = item.clone();
-                    } else {
-                        items.push(item.clone());
+                    thread.checkpoint_turn();
+                    self.store.save(&thread)?;
+                    if first {
+                        let mut started = item.clone();
+                        if item_type == "reasoning" {
+                            started["summary"] = json!([]);
+                        }
+                        notify(
+                            &self.output,
+                            "item/started",
+                            json!({"threadId":id,"turnId":turn_id,"item":started}),
+                        );
+                        if item_type == "reasoning" {
+                            notify(
+                                &self.output,
+                                "item/reasoning/summaryPartAdded",
+                                json!({"threadId":id,"turnId":turn_id,"itemId":item_id,"summaryIndex":0}),
+                            );
+                            notify(
+                                &self.output,
+                                "item/reasoning/summaryTextDelta",
+                                json!({"threadId":id,"turnId":turn_id,"itemId":item_id,"summaryIndex":0,"delta":item["summary"][0]}),
+                            );
+                        }
                     }
-                }
-                thread.checkpoint_turn();
-                self.store.save(&thread)?;
-                if first {
-                    notify(
-                        &self.output,
-                        "item/started",
-                        json!({"threadId":id,"turnId":turn_id,"item":item}),
-                    );
-                }
-                // Full native text snapshots are authoritative; repeated deltas are not replay-safe.
-                if changed && (step["state"] == "STATE_DONE" || step["state"] == "STATE_ERROR") {
-                    notify(
-                        &self.output,
-                        "item/completed",
-                        json!({"threadId":id,"turnId":turn_id,"item":item}),
-                    );
-                } else if changed
-                    && item_type == "agentMessage"
-                    && !first
-                    && delta.as_ref().is_some_and(|s| !s.is_empty())
-                {
-                    notify(
-                        &self.output,
-                        "item/agentMessage/delta",
-                        json!({"threadId":id,"turnId":turn_id,"itemId":item_id,"delta":delta}),
-                    );
-                } else if changed && !first {
-                    notify(
-                        &self.output,
-                        "item/started",
-                        json!({"threadId":id,"turnId":turn_id,"item":item}),
-                    );
+                    // Full native text snapshots are authoritative; repeated deltas are not replay-safe.
+                    if changed && (step["state"] == "STATE_DONE" || step["state"] == "STATE_ERROR")
+                    {
+                        notify(
+                            &self.output,
+                            "item/completed",
+                            json!({"threadId":id,"turnId":turn_id,"item":item}),
+                        );
+                    } else if changed
+                        && item_type == "agentMessage"
+                        && !first
+                        && delta.as_ref().is_some_and(|s| !s.is_empty())
+                    {
+                        notify(
+                            &self.output,
+                            "item/agentMessage/delta",
+                            json!({"threadId":id,"turnId":turn_id,"itemId":item_id,"delta":delta}),
+                        );
+                    } else if changed
+                        && item_type == "reasoning"
+                        && !first
+                        && delta.as_ref().is_some_and(|s| !s.is_empty())
+                    {
+                        notify(
+                            &self.output,
+                            "item/reasoning/summaryTextDelta",
+                            json!({"threadId":id,"turnId":turn_id,"itemId":item_id,"summaryIndex":0,"delta":delta}),
+                        );
+                    } else if changed && !first {
+                        notify(
+                            &self.output,
+                            "item/started",
+                            json!({"threadId":id,"turnId":turn_id,"item":item}),
+                        );
+                    }
                 }
             }
         }

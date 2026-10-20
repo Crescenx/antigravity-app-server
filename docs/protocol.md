@@ -71,6 +71,18 @@ One JSON object per line. Requests use `id`, `method`, `params`; responses echo 
 
 Use the returned `thread.id`. Observe `item/started`, `item/completed`, `thread/tokenUsage/updated` and `turn/completed`. A successful turn/start response means accepted, not completed. Persist request identities; unknown execution outcomes must not be automatically replayed.
 
+Native `thinking` is exposed through Codex-style `reasoning` items with
+`summary: [text]` and `content: []`. Streaming uses
+`item/reasoning/summaryPartAdded` and `item/reasoning/summaryTextDelta`
+(`summaryIndex: 0`), bounded by `item/started` and `item/completed`.
+The reasoning item ID is the native step ID plus `:reasoning`; any user-facing
+answer retains the original step ID as an `agentMessage`. Tool-only model
+steps do not produce empty messages. Historical reads apply the same mapping.
+Full item snapshots replace prior content when the native text is revised;
+replayed snapshots do not duplicate summary deltas. This is presentation
+compatibility, not a claim that native thinking and Codex summaries have the
+same generation process.
+
 Sessions: `thread/list`, `thread/read`, `thread/resume`, `thread/unload`, `thread/name/set`, `thread/archive`, `thread/unarchive`. Read with `{threadId}`; resume reattaches persisted App session state. Legacy SDK records cannot resume execution.
 
 Control: `turn/interrupt` uses `{threadId,turnId}`. `turn/steer` requires `threadId`, `expectedTurnId`, a unique `clientUserMessageId`, and the input array. Steering is durable and FIFO; dispatch acknowledgement is separate from provider consumption.
