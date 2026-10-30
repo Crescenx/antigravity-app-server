@@ -257,6 +257,119 @@ async fn viewer_tools_and_cache_usage_have_standard_events() {
 }
 
 #[test]
+fn captured_app_context_replays_into_viewer_usage() {
+    // App 2.24.0 GetCascadeTrajectory capture, restricted to token metadata.
+    let response: Value =
+        serde_json::from_str(include_str!("testdata/native-context-window.json")).unwrap();
+    let mut state = native_state::NativeState::new("replay");
+    let events = state.snapshot(&response);
+    let usage = events.iter().find_map(|e| e.get("usageUpdate")).unwrap();
+    let public = compat::usage(usage, &Value::Null);
+    assert_eq!(public["modelContextWindow"], 840000);
+    assert_eq!(public["contextWindow"]["estimatedTokensUsed"], 18792);
+    assert_eq!(
+        public["contextWindow"]["tokenBreakdown"]["groups"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(public["last"]["inputTokens"], 20292);
+    assert_eq!(public["last"]["totalTokens"], 20309);
+    assert_eq!(public["total"]["totalTokens"], 20309);
+    assert_eq!(public["lastScope"], "nativeModelInvocation");
+    assert!(
+        state
+            .snapshot(&response)
+            .iter()
+            .all(|event| event.get("usageUpdate").is_none())
+    );
+}
+
+#[test]
+fn viewer_usage_separates_context_from_cumulative_cost() {
+    let previous = json!({"total":{"promptTokenCount":20000,"totalTokenCount":21000}});
+    let mut usage = json!({"total":null,"contextWindow":{
+        "estimatedTokensUsed":18792,"maxContextTokens":840000,
+        "tokenBreakdown":{"totalTokens":18792},"truncationReason":"TRUNCATION_REASON_UNSPECIFIED"
+    }});
+    let estimate = compat::usage(&usage, &previous);
+    assert_eq!(estimate["last"]["totalTokens"], 18792);
+    assert_eq!(estimate["total"]["totalTokens"], 21000);
+    assert_eq!(estimate["modelContextWindow"], 840000);
+    assert_eq!(estimate["lastScope"], "nativeContextWindowEstimate");
+    assert_eq!(estimate["contextWindow"], usage["contextWindow"]);
+    usage["lastInvocationUsage"] = json!({"inputTokens":"549","cacheReadTokens":"6481",
+        "outputTokens":"116","thinkingOutputTokens":"100"});
+    usage["total"] = json!({"promptTokenCount":27030,"totalTokenCount":28146});
+    let actual = compat::usage(&usage, &previous);
+    assert_eq!(
+        actual["last"],
+        json!({"inputTokens":7030,"cachedInputTokens":6481,
+        "outputTokens":16,"reasoningOutputTokens":100,"totalTokens":7146})
+    );
+    assert_eq!(actual["total"]["totalTokens"], 28146);
+    assert_eq!(actual["lastScope"], "nativeModelInvocation");
+    for invalid in [
+        Value::Null,
+        json!({"estimatedTokensUsed":-1,"maxContextTokens":840000}),
+        json!({"estimatedTokensUsed":10,"maxContextTokens":0}),
+    ] {
+        usage["contextWindow"] = invalid;
+        let result = compat::usage(&usage, &previous);
+        assert!(result["modelContextWindow"].is_null());
+        assert_eq!(result["last"]["totalTokens"], 7146);
+        assert_eq!(result["lastScope"], "nativeUsageUpdateDelta");
+    }
+}
+
+#[tokio::test]
+async fn viewer_context_is_published_and_persisted_before_billing_usage() {
+    let (mut server, mut thread, mut output) = fixture();
+    thread.turn = Some(json!({"id":"turn","status":"inProgress","items":[]}));
+    thread.usage = json!({"total":{"totalTokenCount":21000}});
+    server.store.save(&thread).unwrap();
+    let (commands, _rx) = mpsc::channel(4);
+    server.connections.insert(
+        thread.id.clone(),
+        Connection {
+            pid: None,
+            generation: "test".into(),
+            commands,
+        },
+    );
+    let mut state = native_state::NativeState::new(&thread.id);
+    let events = state.snapshot(&json!({"generatorMetadata":[{"chatModel":{
+        "chatStartMetadata":{"contextWindowMetadata":{"estimatedTokensUsed":18792,"maxContextTokens":840000}}
+    }}]}));
+    for event in events {
+        server
+            .event(RuntimeEvent {
+                id: thread.id.clone(),
+                generation: "test".into(),
+                event: Ok(event),
+            })
+            .await
+            .unwrap();
+    }
+    let saved = server.store.load(&thread.id).unwrap();
+    assert_eq!(saved.usage, thread.usage);
+    assert_eq!(
+        compat::thread(&saved)["tokenUsage"]["modelContextWindow"],
+        840000
+    );
+    assert_eq!(saved.token_usage["last"]["totalTokens"], 18792);
+    let mut updates = Vec::new();
+    while let Ok(event) = output.try_recv() {
+        if event["method"] == "thread/tokenUsage/updated" {
+            updates.push(event);
+        }
+    }
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0]["params"]["tokenUsage"], saved.token_usage);
+}
+
+#[test]
 fn viewer_policy_does_not_silently_accept_unenforced_sandbox() {
     for policy in [
         json!({"type":"notAPolicy"}),

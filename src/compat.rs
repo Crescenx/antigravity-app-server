@@ -9,6 +9,11 @@ pub fn usage(current: &Value, previous: &Value) -> Value {
     };
     let mut total = json!({});
     let mut last = json!({});
+    let cumulative = if current["total"].is_object() {
+        current
+    } else {
+        previous
+    };
     for (native, key) in [
         ("promptTokenCount", "inputTokens"),
         ("cachedContentTokenCount", "cachedInputTokens"),
@@ -16,11 +21,43 @@ pub fn usage(current: &Value, previous: &Value) -> Value {
         ("thoughtsTokenCount", "reasoningOutputTokens"),
         ("totalTokenCount", "totalTokens"),
     ] {
-        let n = count(current, native);
+        let n = count(cumulative, native);
         total[key] = json!(n);
         last[key] = json!(n.saturating_sub(count(previous, native)));
     }
-    json!({"total":total,"last":last,"modelContextWindow":null,"lastScope":"nativeUsageUpdateDelta"})
+    let mut result = json!({"total":total,"last":last,"modelContextWindow":null,"lastScope":"nativeUsageUpdateDelta"});
+    let context = &current["contextWindow"];
+    if let (Some(used), Some(window)) = (
+        context["estimatedTokensUsed"].as_u64(),
+        context["maxContextTokens"].as_u64().filter(|n| *n > 0),
+    ) {
+        let usage = &current["lastInvocationUsage"];
+        let number = |key: &str| {
+            usage[key]
+                .as_u64()
+                .or_else(|| usage[key].as_str()?.parse().ok())
+                .unwrap_or(0)
+        };
+        let cached = number("cacheReadTokens");
+        let input = if usage.is_object() {
+            number("inputTokens").saturating_add(cached)
+        } else {
+            used
+        };
+        let output = number("outputTokens");
+        let thinking = number("thinkingOutputTokens");
+        result["last"] = json!({"inputTokens":input,"cachedInputTokens":cached,
+            "outputTokens":output.saturating_sub(thinking),"reasoningOutputTokens":thinking,
+            "totalTokens":input.saturating_add(output)});
+        result["modelContextWindow"] = json!(window);
+        result["lastScope"] = json!(if usage.is_object() {
+            "nativeModelInvocation"
+        } else {
+            "nativeContextWindowEstimate"
+        });
+        result["contextWindow"] = context.clone();
+    }
+    result
 }
 
 pub fn tool_item(step: &Value, id: &str) -> Option<Value> {

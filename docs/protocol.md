@@ -71,6 +71,22 @@ One JSON object per line. Requests use `id`, `method`, `params`; responses echo 
 
 Use the returned `thread.id`. Observe `item/started`, `item/completed`, `thread/tokenUsage/updated` and `turn/completed`. A successful turn/start response means accepted, not completed. Persist request identities; unknown execution outcomes must not be automatically replayed.
 
+`thread/tokenUsage/updated.params.tokenUsage.total` reports cumulative model
+consumption. When the latest model invocation supplies native context metadata,
+`modelContextWindow` reports its `maxContextTokens`, and `last` reports that
+invocation's token counts (`lastScope: "nativeModelInvocation"`), including cached
+input and counting reasoning output once. Before invocation usage arrives, `last`
+reports the start-of-call input estimate with zero output
+(`lastScope: "nativeContextWindowEstimate"`). The additive `contextWindow` field
+preserves native `estimatedTokensUsed`, `maxContextTokens`, `tokenBreakdown`, and
+`truncationReason` when present. Clients can display `last.totalTokens /
+modelContextWindow`, or use `contextWindow.estimatedTokensUsed` specifically for
+the start-of-call estimate. These reports are snapshots, not a live token counter.
+Context-only updates are emitted and persisted without charging cumulative usage.
+When the latest context is unavailable, `modelContextWindow` is null and `last`
+retains the legacy cumulative-update delta (`lastScope: "nativeUsageUpdateDelta"`);
+that delta must not be interpreted as context occupancy.
+
 Native `thinking` is exposed through Codex-style `reasoning` items with
 `summary: [text]` and `content: []`. Streaming uses
 `item/reasoning/summaryPartAdded` and `item/reasoning/summaryTextDelta`

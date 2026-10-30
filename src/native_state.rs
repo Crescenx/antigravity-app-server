@@ -204,6 +204,22 @@ impl NativeState {
     }
 
     fn usage(&self) -> Value {
+        let mut usage = self.cumulative_usage();
+        // Never reuse an older invocation's window when the newest model has none.
+        if self.generators.len() == self.generator_count
+            && let Some(model) = self
+                .generators
+                .values()
+                .rev()
+                .find_map(|g| g.get("chatModel").filter(|m| m.is_object()))
+        {
+            usage["contextWindow"] = model["chatStartMetadata"]["contextWindowMetadata"].clone();
+            usage["lastInvocationUsage"] = model["usage"].clone();
+        }
+        usage
+    }
+
+    fn cumulative_usage(&self) -> Value {
         if self.generators.len() != self.generator_count {
             return json!({"total":null,"modelCallCount":null,"source":"appGeneratorMetadata","incomplete":true});
         }
@@ -547,6 +563,52 @@ mod tests {
         state.apply(&update);
         state.apply(&update);
         assert_eq!(state.usage()["total"]["totalTokenCount"], 17);
+    }
+
+    #[test]
+    fn context_tracks_latest_invocation_before_usage_and_never_reuses_an_old_window() {
+        let mut state = NativeState::new("public");
+        let model = json!({"chatModel":{"chatStartMetadata":{"contextWindowMetadata":{
+            "estimatedTokensUsed":18792,"maxContextTokens":840000,
+            "tokenBreakdown":{"totalTokens":18792}
+        }}}});
+        let update = json!({"mainTrajectoryUpdate":{"generatorMetadatasUpdate":{
+            "totalLength":1,"indices":[0],"generatorMetadatas":[model]
+        }}});
+        let events = state.apply(&update);
+        let usage = &events[0]["usageUpdate"];
+        assert!(usage["total"].is_null());
+        assert_eq!(usage["contextWindow"]["estimatedTokensUsed"], 18792);
+        assert!(
+            state
+                .apply(&update)
+                .iter()
+                .all(|event| event.get("usageUpdate").is_none())
+        );
+
+        let newer = json!({"chatModel":{"usage":{"inputTokens":"549","cacheReadTokens":"6481",
+            "outputTokens":"116","thinkingOutputTokens":"100"},
+            "chatStartMetadata":{"contextWindowMetadata":{"estimatedTokensUsed":7000,"maxContextTokens":256000}}}});
+        state.apply(&json!({"mainTrajectoryUpdate":{"generatorMetadatasUpdate":{
+            "totalLength":2,"indices":[1],"generatorMetadatas":[newer]
+        }}}));
+        // Replaying an earlier generator must not change the latest context.
+        state.apply(&json!({"mainTrajectoryUpdate":{"generatorMetadatasUpdate":{
+            "totalLength":2,"indices":[0],"generatorMetadatas":[model]
+        }}}));
+        let usage = state.usage();
+        assert_eq!(usage["contextWindow"]["maxContextTokens"], 256000);
+        assert_eq!(usage["lastInvocationUsage"]["inputTokens"], "549");
+        assert!(usage["total"].is_null()); // The first generation has no usage yet.
+
+        state.apply(&json!({"mainTrajectoryUpdate":{"generatorMetadatasUpdate":{
+            "totalLength":3,"indices":[2],"generatorMetadatas":[{"chatModel":{}}]
+        }}}));
+        assert!(state.usage()["contextWindow"].is_null());
+        state.apply(&json!({"mainTrajectoryUpdate":{"generatorMetadatasUpdate":{
+            "totalLength":5,"indices":[4],"generatorMetadatas":[model]
+        }}}));
+        assert!(state.usage()["contextWindow"].is_null());
     }
 
     #[test]

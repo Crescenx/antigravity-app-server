@@ -1,0 +1,151 @@
+{
+  "trajectory": {
+    "generatorMetadata": [
+      {
+        "chatModel": {
+          "model": "MODEL_PLACEHOLDER_M403",
+          "usage": {
+            "inputTokens": "7209",
+            "outputTokens": "17",
+            "responseOutputTokens": "17",
+            "cacheReadTokens": "13083"
+          },
+          "chatStartMetadata": {
+            "contextWindowMetadata": {
+              "estimatedTokensUsed": 18792,
+              "tokenBreakdown": {
+                "groups": [
+                  {
+                    "name": "System Prompt",
+                    "type": "TOKEN_TYPE_SYSTEM_PROMPT",
+                    "source": "TOKEN_SOURCE_SYSTEM",
+                    "numTokens": 6635,
+                    "children": [
+                      {
+                        "name": "identity",
+                        "numTokens": 159
+                      },
+                      {
+                        "name": "terminal_sandbox",
+                        "numTokens": 1134
+                      },
+                      {
+                        "name": "artifacts",
+                        "numTokens": 1239
+                      },
+                      {
+                        "name": "conversation_transcript",
+                        "numTokens": 656
+                      },
+                      {
+                        "name": "guidelines",
+                        "numTokens": 79
+                      },
+                      {
+                        "name": "communication_style",
+                        "numTokens": 175
+                      },
+                      {
+                        "name": "slash_commands",
+                        "numTokens": 616
+                      },
+                      {
+                        "name": "messaging",
+                        "numTokens": 293
+                      },
+                      {
+                        "name": "subagents",
+                        "numTokens": 686
+                      },
+                      {
+                        "name": "skills",
+                        "numTokens": 1403
+                      },
+                      {
+                        "name": "user_information",
+                        "numTokens": 195
+                      }
+                    ]
+                  },
+                  {
+                    "name": "Tools",
+                    "type": "TOKEN_TYPE_TOOLS",
+                    "source": "TOKEN_SOURCE_SYSTEM",
+                    "numTokens": 11995,
+                    "children": [
+                      {
+                        "name": "view_file",
+                        "numTokens": 793
+                      },
+                      {
+                        "name": "run_command",
+                        "numTokens": 1275
+                      },
+                      {
+                        "name": "manage_task",
+                        "numTokens": 538
+                      },
+                      {
+                        "name": "send_message",
+                        "numTokens": 343
+                      },
+                      {
+                        "name": "schedule",
+                        "numTokens": 2407
+                      },
+                      {
+                        "name": "invoke_subagent",
+                        "numTokens": 1168
+                      },
+                      {
+                        "name": "define_subagent",
+                        "numTokens": 683
+                      },
+                      {
+                        "name": "manage_subagents",
+                        "numTokens": 814
+                      },
+                      {
+                        "name": "write_to_file",
+                        "numTokens": 1028
+                      },
+                      {
+                        "name": "replace_file_content",
+                        "numTokens": 1417
+                      },
+                      {
+                        "name": "read_url_content",
+                        "numTokens": 385
+                      },
+                      {
+                        "name": "search_web",
+                        "numTokens": 301
+                      },
+                      {
+                        "name": "ask_question",
+                        "numTokens": 843
+                      }
+                    ]
+                  },
+                  {
+                    "name": "Chat Messages",
+                    "type": "TOKEN_TYPE_CHAT_MESSAGES",
+                    "numTokens": 162,
+                    "children": [
+                      {
+                        "name": "0: USER_INPUT",
+                        "numTokens": 162
+                      }
+                    ]
+                  }
+                ],
+                "totalTokens": 18792
+              },
+              "maxContextTokens": 840000
+            }
+          }
+        }
+      }
+    ]
+  }
+}

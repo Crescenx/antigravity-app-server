@@ -908,14 +908,19 @@ impl Server {
         if let Some(hook) = event.get("callHookRequest") {
             return self.native_hook(&mut thread, hook).await;
         }
-        if let Some(usage) = event.get("usageUpdate").filter(|u| u["total"].is_object()) {
-            if usage != &thread.usage {
-                thread.token_usage = compat::usage(usage, &thread.usage);
+        if let Some(usage) = event.get("usageUpdate") {
+            let token_usage = compat::usage(usage, &thread.usage);
+            if token_usage != thread.token_usage {
+                thread.token_usage = token_usage;
                 notify(
                     &self.output,
                     "thread/tokenUsage/updated",
                     json!({"threadId":id,"turnId":thread.turn.as_ref().map(|t|t["id"].clone()),"tokenUsage":thread.token_usage}),
                 );
+            }
+            if !usage["total"].is_object() {
+                self.store.save(&thread)?;
+                return Ok(());
             }
             goal::charge(&mut thread, usage);
             thread.usage = usage.clone();
